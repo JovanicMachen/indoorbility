@@ -22,6 +22,14 @@ public enum LiveGuidance {
     public static func measuredTurns(_ path: [SpatialPoint]) -> [MeasuredTurn] {
         guard path.count >= 3 else { return [] }
         var turns: [MeasuredTurn] = []
+        var bend: [(turn: MeasuredTurn, angle: Float)] = []
+        func finishBend() {
+            guard let peak = bend.map(\.angle).max() else { return }
+            // Choose the middle of a curvature plateau, not every scan sample on a curve.
+            let strongest = bend.filter { $0.angle >= peak - 0.001 }
+            turns.append(strongest[strongest.count/2].turn)
+            bend.removeAll()
+        }
         var along: Float = 0
         for i in 1..<(path.count - 1) {
             along += path[i-1].distance(to: path[i])
@@ -31,13 +39,16 @@ public enum LiveGuidance {
             let incoming = atan2(path[i].z-path[a].z, path[i].x-path[a].x)
             let outgoing = atan2(path[b].z-path[i].z, path[b].x-path[i].x)
             let delta = atan2(sin(outgoing-incoming), cos(outgoing-incoming))
-            // Require a substantial mapped bend and prefer the local maximum of curvature.
-            let localIn = atan2(path[i].z-path[i-1].z, path[i].x-path[i-1].x)
-            let localOut = atan2(path[i+1].z-path[i].z, path[i+1].x-path[i].x)
-            let localDelta = atan2(sin(localOut-localIn), cos(localOut-localIn))
-            guard abs(delta) > .pi/4, abs(localDelta) > .pi/4 else { continue }
-            turns.append(MeasuredTurn(index: i, along: along, direction: delta < 0 ? "left" : "right"))
+            // Compare metre-scale headings. A rounded corner need not contain any
+            // single sample with a 45-degree kink; that requirement missed real turns.
+            guard abs(delta) > .pi/4 else { continue }
+            let turn = MeasuredTurn(index: i, along: along, direction: delta < 0 ? "left" : "right")
+            if let last = bend.last, turn.direction != last.turn.direction || along-last.turn.along > 2 {
+                finishBend()
+            }
+            bend.append((turn, abs(delta)))
         }
+        finishBend()
         return turns
     }
     public static func message(_ follower: HallwayFollower, feet: Bool = false) -> GuidanceMessage {
@@ -49,7 +60,7 @@ public enum LiveGuidance {
         if follower.instruction.hasPrefix("Turn around") || follower.instruction.hasPrefix("You may") || follower.instruction.hasPrefix("Check your heading") {
             return GuidanceMessage(id: follower.instruction, text: follower.instruction, cue: .attention)
         }
-        if follower.instruction.hasPrefix("Stairs") {
+        if follower.instruction.hasPrefix("Stairs") || follower.instruction.hasPrefix("Level change") {
             return GuidanceMessage(id: follower.instruction, text: follower.instruction, cue: .attention)
         }
         if let turn = follower.nextMeasuredTurn {

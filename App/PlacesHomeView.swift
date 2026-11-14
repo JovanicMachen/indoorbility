@@ -164,6 +164,18 @@ struct PlacesHomeView: View {
             }
         }
 
+        .swipeLeftToGoBack {
+            guard searchExpanded else { return }
+            if proposal != nil || outdoorProposal != nil {
+                proposal = nil; outdoorProposal = nil; confirmation.cancel(); store.stopSpeech()
+                return
+            }
+            searchFocused = false
+            voice.cancel(); assistant.agent.cancel(); outdoor.cancel(); google.cancel()
+            suggestions.update("", near: nil); confirmation.cancel(); store.stopSpeech()
+            searchGeneration = UUID(); proposal = nil; outdoorProposal = nil
+            query = ""; resolvingQuery = ""; message = ""; searched = false
+        }
         .toolbar(.hidden, for: .navigationBar)
 
         .onAppear {

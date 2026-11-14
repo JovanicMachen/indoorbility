@@ -10,20 +10,26 @@ struct ScanHubView: View {
     var body: some View {
         List {
             Section {
-                NavigationLink("Building maps") { BuildingCollectionsView(library: library, settings: store) }
-                NavigationLink("Import or share maps") { MapTransferView(library: library, drafts: []) }
-                NavigationLink { RememberRouteView(settings: store) } label: { row("Remember a route", subtitle: "Walk from an entrance to a room once", symbol: "location.north.line") }
-                Button { signPresented = true } label: {
-                    row("Read a closure sign", subtitle: "Review a report before updating your route", symbol: "text.viewfinder")
-                }.accessibilityIdentifier("readSign")
-                NavigationLink { SpatialCaptureView(library: library) } label: {
-                    row("Scan a space", subtitle: SpatialSession.supportsLiDAR ? "Save a map using LiDAR" : "Requires a LiDAR-equipped device", symbol: "cube.transparent")
-                }.accessibilityIdentifier("newSpatialScan")
+                NavigationLink { RememberRouteView(settings: store) } label: {
+                    row("Record route", subtitle: "Choose a building, start and destination", symbol: "record.circle")
+                }.accessibilityIdentifier("recordRoute")
+            }
+            Section {
+                DisclosureGroup("Map tools") {
+                    NavigationLink("Connect building areas") { BuildingCollectionsView(library: library, settings: store) }
+                    NavigationLink("Import or share") { MapTransferView(library: library, drafts: []) }
+                    Button { signPresented = true } label: {
+                        Label("Read closure sign", systemImage: "text.viewfinder")
+                    }.accessibilityIdentifier("readSign")
+                    NavigationLink { SpatialCaptureView(library: library) } label: {
+                        Label("Scan a space", systemImage: "cube.transparent")
+                    }.accessibilityIdentifier("newSpatialScan")
+                }
             }
             Section {
                 if library.scans.isEmpty {
-                    Text("No mapping records yet").foregroundStyle(.secondary)
-                    Text("Scan a space to save it here. Reopen it later to locate yourself in that space.").font(.subheadline).foregroundStyle(.secondary)
+                    Text("No routes yet").foregroundStyle(.secondary)
+                    Text("Record a walk between two familiar places.").font(.subheadline).foregroundStyle(.secondary)
                 }
                 ForEach(library.scans) { draft in
                     NavigationLink { ScanDetailView(library: library, settings: store, draft: draft) } label: {
@@ -38,10 +44,10 @@ struct ScanHubView: View {
                     }
                     .accessibilityAction(named: "Delete recording") { pendingDelete = draft }
                 }
-            } header: { Text("Saved rooms & areas") } footer: { Text("Swipe left or hold a recording to delete it.") }
+            } header: { Text("Saved routes") } footer: { Text("Swipe left or hold a recording to delete it.") }
             if let error = library.error { Text(error).foregroundStyle(.red) }
             if let deletionError { Text(deletionError).foregroundStyle(.red) }
-        }.navigationTitle("Saved rooms & areas").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("Routes").navigationBarTitleDisplayMode(.inline)
             .onAppear { library.reload() }
             .confirmationDialog("Delete this recording?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible) {
                 if let draft = pendingDelete {
@@ -83,7 +89,15 @@ struct ScanDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Text(draft.name).font(.largeTitle.bold())
-                SmallTag(text: "Unverified spatial draft", symbol: "square.3.layers.3d")
+                if let route = try? library.hallway(draft) {
+                    Text(route.entrance.label + " → " + route.room.label).font(.headline)
+                    SmallTag(text: library.visitorReady(route) ? "Saved route" : "Ready to publish", symbol: "point.topleft.down.to.point.bottomright.curvepath")
+                    if library.visitorReady(route) {
+                        NavigationLink("Start directions") {
+                            HallwayLaunchView(route: route, draft: draft, library: library, settings: settings)
+                        }.buttonStyle(ForestButtonStyle())
+                    }
+                } else { SmallTag(text: "Saved scan", symbol: "square.3.layers.3d") }
                 TraceView(samples: draft.samples, landmarks: draft.landmarks)
                 if library.requiresVolunteerReview(draft.id), let route = try? library.hallway(draft) {
                     NavigationLink("Preview & publish") { VolunteerReviewView(library: library, settings: settings, draft: draft, route: route) }
@@ -103,7 +117,7 @@ struct ScanDetailView: View {
                 if let error { Text(error).foregroundStyle(.red) }
                 Text("The trace records where the camera travelled. It does not establish corridor widths, safe clearance or accessible routes.").font(.footnote).foregroundStyle(.secondary)
             }.padding(20)
-        }.background(Color.indoorBackground).navigationTitle("Saved space").navigationBarTitleDisplayMode(.inline)
+        }.background(Color.indoorBackground).swipeLeftToGoBack().navigationTitle("Saved space").navigationBarTitleDisplayMode(.inline)
             .confirmationDialog("Delete this scan and its spatial map?", isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete scan", role: .destructive) { do { try library.delete(draft); dismiss() } catch { self.error = error.localizedDescription } }
             }

@@ -5,28 +5,50 @@ import IndoorbilityCore
 
 @MainActor final class OutdoorLocation: NSObject, ObservableObject, @preconcurrency CLLocationManagerDelegate {
     @Published var location: CLLocation?
+    @Published var heading: CLHeading?
     @Published var message = "Location is off"
+    private var requested = false
     let manager = CLLocationManager()
-    override init() { super.init(); manager.delegate = self; manager.desiredAccuracy = kCLLocationAccuracyBest; manager.activityType = .fitness; manager.distanceFilter = kCLDistanceFilterNone; manager.pausesLocationUpdatesAutomatically = false }
+    override init() { super.init(); manager.delegate = self; manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation; manager.headingFilter = 3; manager.headingOrientation = .portrait; manager.activityType = .fitness; manager.distanceFilter = kCLDistanceFilterNone; manager.pausesLocationUpdatesAutomatically = false }
     func start() {
+        requested = true
         switch manager.authorizationStatus {
         case .notDetermined: manager.requestWhenInUseAuthorization()
-        case .authorizedAlways, .authorizedWhenInUse: manager.startUpdatingLocation()
+        case .authorizedAlways, .authorizedWhenInUse:
+            manager.startUpdatingLocation()
+            updateHeadingOrientation()
+            if CLLocationManager.headingAvailable() { manager.startUpdatingHeading() }
         default: message = "Allow location in iPhone Settings to use outdoor directions."
         }
     }
-    func stop() { manager.stopUpdatingLocation(); location = nil }
+    func stop() { requested = false; manager.stopUpdatingLocation(); manager.stopUpdatingHeading(); location = nil; heading = nil }
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        if [.authorizedAlways, .authorizedWhenInUse].contains(manager.authorizationStatus) { manager.startUpdatingLocation() }
+        if requested { start() }
     }
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let value = locations.last, value.horizontalAccuracy >= 0,
+        guard requested, let value = locations.last, value.horizontalAccuracy >= 0,
               abs(value.timestamp.timeIntervalSinceNow) < 10 else { return }
+        guard location.map({ value.timestamp > $0.timestamp }) ?? true else { return }
         location = value; message = "Location updated"
     }
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         if let failure = error as? CLError, failure.code == .locationUnknown { message = "Updating GPS…"; return }
         message = error.localizedDescription; location = nil
+    }
+    func updateHeadingOrientation() {
+        let orientation: CLDeviceOrientation
+        switch UIDevice.current.orientation {
+        case .landscapeLeft: orientation = .landscapeLeft
+        case .landscapeRight: orientation = .landscapeRight
+        case .portraitUpsideDown: orientation = .portraitUpsideDown
+        case .portrait: orientation = .portrait
+        default: return // Keep the last orientation when the phone is flat.
+        }
+        if manager.headingOrientation != orientation { manager.headingOrientation = orientation; heading = nil }
+    }
+    func locationManager(_ manager: CLLocationManager, didUpdateHeading newHeading: CLHeading) {
+        guard requested else { return }
+        heading = newHeading.magneticHeading.isFinite && newHeading.trueHeading.isFinite && newHeading.headingAccuracy >= 0 && newHeading.headingAccuracy <= 20 ? newHeading : nil
     }
     var entranceFix: EntranceLocation? {
         guard let location, location.horizontalAccuracy <= 20, abs(location.timestamp.timeIntervalSinceNow) < 5 else { return nil }
@@ -88,6 +110,8 @@ struct OutdoorRouteView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var route: MKRoute?
     @State private var walking: OutdoorProgress?
+    @State private var approach = ApproachFeedback()
+    @State private var displayTime = Date()
     @State private var walkingOrigin: MKMapPoint?
     @State private var walkingScale = 1.0
     @State private var spokenWalking = ""
@@ -96,6 +120,8 @@ struct OutdoorRouteView: View {
     @AppStorage("guidanceFeet") private var feet = false
     @State private var error: String?
     @State private var directions: MKDirections?
+    @State private var nextRouteRetry = Date.distantFuture
+    @State private var routeRetryDelay: TimeInterval = 5
     @State private var presented = false
     @State private var approachDistance: Double?
     @State private var started = false
@@ -118,7 +144,7 @@ struct OutdoorRouteView: View {
                         Spacer()
                     }.padding()
                     if !showingMap, !insideBuilding, !(nearBuilding && !continueOutside && route == nil) {
-                        DirectionBadge(instruction: walking?.wrongWay == true ? "Turn around when safe" : walking?.instruction.isEmpty == false ? walking!.travelInstruction : "Continue along the mapped path", reliable: walking?.status == .guiding)
+                        DirectionBadge(instruction: walking?.wrongWay == true ? "Turn around when safe" : walking?.instruction.isEmpty == false ? walking!.travelInstruction : "Continue along the mapped path", reliable: walking?.status == .guiding, proximity: approach.trend, distanceText: destinationDistanceText)
                     }
                 }
                 if !automaticallyStart || showingMap {
@@ -214,7 +240,14 @@ struct OutdoorRouteView: View {
                 else { Task { await camera.start(navigation: true) } }
             }
             .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now in
+                displayTime = now
+                location.updateHeadingOrientation()
+                if lastWalkingFix.map({ now.timeIntervalSince($0) > 3 }) ?? true { approach.reset() }
                 if now >= awarenessUntil { awarenessMessage = nil }
+                if phase == .active, started, !presented, roomRequest == nil, roomTarget == nil,
+                   !insideBuilding, !arrived, now >= nextRouteRetry, directions == nil {
+                    Task { await calculate() }
+                }
                 if !insideBuilding, !presented, roomRequest == nil, roomTarget == nil,
                    walking != nil, walking?.status != .locating,
                    let lastWalkingFix, now.timeIntervalSince(lastWalkingFix) > 10 {
@@ -312,9 +345,22 @@ struct OutdoorRouteView: View {
             Button("Done") { dismiss() }.buttonStyle(.bordered)
         }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.indoorBackground.ignoresSafeArea())
     }
+    private var destinationDistanceText: String? {
+        guard let walking, walking.status == .guiding || walking.status == .nearDestination,
+              let fix = location.location, displayTime.timeIntervalSince(fix.timestamp) <= 5 else { return nil }
+        let feet = max(0, (walking.remainingRouteDistance * 3.28084 / 5).rounded() * 5)
+        return "About \(Int(feet)) ft along route"
+    }
     private var walkingInstruction: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Outdoor guidance · GPS").font(.caption).foregroundStyle(.secondary)
+            if let destinationDistanceText { Text(destinationDistanceText).font(.headline).monospacedDigit() }
+            if let heading = location.heading, abs(displayTime.timeIntervalSince(heading.timestamp)) <= 3 {
+                let degrees = heading.trueHeading >= 0 ? heading.trueHeading : heading.magneticHeading
+                let labels = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+                Label("Phone facing " + labels[Int((degrees + 22.5) / 45) % 8], systemImage: "location.north.line")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let fix = location.location, fix.horizontalAccuracy > 12 {
                 Text("GPS is approximate. Check the map.").font(.caption).foregroundStyle(.secondary)
             }
@@ -331,7 +377,7 @@ struct OutdoorRouteView: View {
                 case .guiding:
                     Label(walking.wrongWay ? "You may be going the wrong way. Turn around when safe." : walking.travelInstruction.isEmpty ? "Continue along the mapped path" : walking.travelInstruction, systemImage: walking.wrongWay ? "arrow.uturn.backward" : walkingSymbol(walking.travelInstruction))
                         .font(.title3.bold()).accessibilityIdentifier("outdoorLiveInstruction")
-                    if !walking.wrongWay { Text(walking.upcomingDetail(feet: feet)).font(.subheadline) }
+                    if !walking.wrongWay { Text(walking.upcomingDetail(feet: true)).font(.subheadline) }
                     if !walking.wrongWay, let next = walking.nextInstruction, !next.isEmpty { Text("Then: " + next).font(.subheadline) }
                 }
                 HStack {
@@ -391,7 +437,7 @@ struct OutdoorRouteView: View {
             }
             return OutdoorProgress.Leg(instruction: step.instructions, points: points)
         }
-        walking = OutdoorProgress(legs: legs); spokenWalking = ""
+        walking = OutdoorProgress(legs: legs); approach.reset(); spokenWalking = ""
         if let fix = location.location { updateWalking(fix) }
     }
     private func updateWalking(_ fix: CLLocation) {
@@ -399,6 +445,10 @@ struct OutdoorRouteView: View {
         let p = MKMapPoint(fix.coordinate)
         walking?.update(.init((p.x-origin.x)*walkingScale, (p.y-origin.y)*walkingScale), accuracy: fix.horizontalAccuracy, timestamp: fix.timestamp.timeIntervalSince1970, now: Date().timeIntervalSince1970, course: fix.speed >= 0.7 && fix.courseAccuracy >= 0 && fix.courseAccuracy <= 25 ? fix.course : nil)
         lastWalkingFix = fix.timestamp
+        if let walking, walking.status == .guiding {
+            approach.update(distance: walking.remainingRouteDistance, accuracy: fix.horizontalAccuracy,
+                            timestamp: fix.timestamp.timeIntervalSince1970, now: Date().timeIntervalSince1970)
+        } else { approach.reset() }
         if walking?.status == .offRoute, Date().timeIntervalSince(lastReplan) > 20, directions == nil, fix.horizontalAccuracy <= 20 {
             lastReplan = Date()
             settings.speak("Checking a new walking route.", priority: .direction)
@@ -418,7 +468,7 @@ struct OutdoorRouteView: View {
         case .locating: text = "Directions paused while GPS settles."
         case .offRoute: text = "You may be off the route. Check the map or find a new route."
         case .nearDestination: text = "Near your destination. Check the entrance."
-        case .guiding: text = walking.wrongWay ? "You may be going the wrong way. Turn around when safe." : (walking.travelInstruction.isEmpty ? "Follow the mapped path." : walking.travelInstruction) + ". " + walking.upcomingDetail(feet: feet) + "."
+        case .guiding: text = walking.wrongWay ? "You may be going the wrong way. Turn around when safe." : (walking.travelInstruction.isEmpty ? "Follow the mapped path." : walking.travelInstruction) + ". " + walking.upcomingDetail(feet: true) + "."
         }
         let key = "\(walking.index)-\(walking.status)-\(walking.wrongWay)-\(walking.travelledOnLeg >= 12)-\(walking.alignedWithPath)-\(walking.announcementBand)"
         let reminder = walking.status == .guiding && Date().timeIntervalSince(lastWalkingAnnouncement) >= 12
@@ -466,9 +516,28 @@ struct OutdoorRouteView: View {
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: fix.coordinate))
         request.destination = destination; request.transportType = .walking
         let task = MKDirections(request: request); directions = task
-        do { let response = try await task.calculate(); guard directions === task else { return }; route = response.routes.first; if let route { installWalking(route); mapPosition = .rect(route.polyline.boundingMapRect.insetBy(dx: -route.polyline.boundingMapRect.size.width * 0.2 - 100, dy: -route.polyline.boundingMapRect.size.height * 0.2 - 100)) }; error = route == nil ? "No walking route is available." : nil }
-        catch { if directions === task && !Task.isCancelled { self.error = "Could not refresh directions. Any loaded route is kept; GPS tracking does not need Wi-Fi. Retry when connected." } }
-        directions = nil
+        nextRouteRetry = .distantFuture
+        do {
+            let response = try await task.calculate()
+            guard directions === task else { return }
+            if let refreshed = response.routes.first {
+                route = refreshed
+                installWalking(refreshed)
+                mapPosition = .rect(refreshed.polyline.boundingMapRect.insetBy(dx: -refreshed.polyline.boundingMapRect.size.width * 0.2 - 100, dy: -refreshed.polyline.boundingMapRect.size.height * 0.2 - 100))
+                error = nil; routeRetryDelay = 5
+            } else {
+                // Keep a loaded route when a refresh returns no alternative.
+                error = "No new walking route found."
+            }
+        } catch {
+            guard directions === task else { return }
+            if !Task.isCancelled {
+                self.error = route == nil ? "Waiting for maps. Retrying…" : "Using saved directions. Retrying maps…"
+                nextRouteRetry = Date().addingTimeInterval(routeRetryDelay)
+                routeRetryDelay = min(60, routeRetryDelay * 2)
+            }
+        }
+        if directions === task { directions = nil }
     }
 }
 

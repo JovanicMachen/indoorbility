@@ -31,6 +31,12 @@ public struct OutdoorProgress {
     private var endFixes = 0
     private var lastTimestamp: Double?
     public init(legs: [Leg]) { self.legs = legs.filter { $0.points.count >= 2 } }
+    public var remainingRouteDistance: Double {
+        guard legs.indices.contains(index) else { return 0 }
+        return remaining + legs.dropFirst(index+1).reduce(0) { total, leg in
+            total + zip(leg.points, leg.points.dropFirst()).reduce(0) { $0 + $1.0.distance($1.1) }
+        }
+    }
     public var instruction: String { legs.indices.contains(index) ? legs[index].instruction : "Route unavailable" }
     public var travelInstruction: String {
         if !alignedWithPath && travelledOnLeg < 12 { return instruction }

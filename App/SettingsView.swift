@@ -16,7 +16,7 @@ struct SettingsView: View {
                 Button { accessibilityPresented = true } label: {
                     Label("Accessibility & guidance", systemImage: "accessibility")
                 }
-                NavigationLink { AgentSettingsView(store: store) } label: {
+                NavigationLink { AgentSettingsView(store: store).swipeLeftToGoBack() } label: {
                     Label("AI connection", systemImage: "bubble.left.and.bubble.right")
                 }
             }
@@ -29,7 +29,7 @@ struct SettingsView: View {
                 }
             }
             Section {
-                NavigationLink("Advanced & testing") { advanced }
+                NavigationLink("Advanced & testing") { advanced.swipeLeftToGoBack() }
                 NavigationLink("Privacy & about") {
                     Form {
                         Section("Your data") {
@@ -41,7 +41,7 @@ struct SettingsView: View {
                             Text("Find a place. Follow a saved route. Return with confidence.")
                             Text("Experimental navigation support; not a replacement for mobility aids or emergency guidance.").font(.footnote).foregroundStyle(.secondary)
                         }
-                    }.navigationTitle("Privacy & about").scrollContentBackground(.hidden).background(Color.indoorBackground)
+                    }.swipeLeftToGoBack().navigationTitle("Privacy & about").scrollContentBackground(.hidden).background(Color.indoorBackground)
                 }
             }
         }

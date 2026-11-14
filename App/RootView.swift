@@ -8,6 +8,8 @@ struct RootView: View {
         TabView(selection: $store.selectedTab) {
             NavigationStack { PlacesHomeView(store: store) }
                 .tabItem { Label("Home", systemImage: "location.north.line") }.tag(0)
+            NavigationStack { ScanHubView(store: store) }
+                .tabItem { Label("Routes", systemImage: "point.topleft.down.to.point.bottomright.curvepath") }.tag(1)
             NavigationStack { SettingsView(store: store) }
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }.tag(3)
         }

@@ -61,4 +61,17 @@ final class OutdoorProgressTests: XCTestCase {
         for i in 6...8 { p.update(.init(42,40), accuracy: 5, timestamp: Double(i), now: Double(i)) }
         XCTAssertEqual(p.status, .offRoute)
     }
+    func testGPSLossRecoversOnSameLoadedRouteWithoutFalseArrival() {
+        var progress = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)])])
+        for t in 1...3 { progress.update(.init(40,0), accuracy: 5, timestamp: Double(t), now: Double(t)) }
+        XCTAssertEqual(progress.status, .guiding)
+        progress.update(.init(99,0), accuracy: 5, timestamp: 3, now: 20)
+        XCTAssertEqual(progress.status, .locating)
+        XCTAssertEqual(progress.index, 0)
+        for t in 21...23 { progress.update(.init(42,0), accuracy: 5, timestamp: Double(t), now: Double(t)) }
+        XCTAssertEqual(progress.status, .guiding)
+        XCTAssertEqual(progress.remaining, 58, accuracy: 0.01)
+        XCTAssertEqual(progress.legs.count, 1)
+    }
+
 }

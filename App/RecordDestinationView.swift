@@ -74,6 +74,7 @@ struct RecordDestinationView: View {
             }.background(Color.indoorBackground)
                 .tint(.indoorTeal)
                 .navigationTitle("Destination").navigationBarTitleDisplayMode(.inline)
+                .swipeLeftToGoBack { dismiss() }
                 .toolbar { Button("Close") { dismiss() } }
                 .navigationDestination(isPresented: $directions) {
                     if let destination = resolvedBuilding {

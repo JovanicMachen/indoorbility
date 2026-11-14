@@ -64,7 +64,7 @@ import IndoorbilityCore
     }
 }
 
-/// Original low-volume synthesized tones; no downloaded or system notification sounds.
+/// User-supplied travel tick plus synthesized directional cues.
 @MainActor final class NavigationAudioCoordinator {
     private var player: AVAudioPlayer?
     private(set) var lastCue = "None"

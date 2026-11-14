@@ -25,10 +25,12 @@ final class AppStore: ObservableObject {
               UserDefaults.standard.object(forKey: "travelFeedback") as? Bool ?? true else {
             travelPosition = nil; return
         }
-        guard travelContext == context, let previous = travelPosition else {
+        guard travelContext == context, travelPosition != nil else {
             travelContext = context; travelPosition = position; travelTime = now; return
         }
-        guard now - travelTime >= 10, simd_distance(position, previous) >= 4 else { return }
+        // Repeat only while navigation supplies a reliable position. No detached audio loop
+        // can continue after tracking stops, arrival, or leaving navigation.
+        guard now - travelTime >= 2 else { return }
         guard !speaker.isSpeaking, !UIAccessibility.isVoiceOverRunning, now-lastPriorityCue >= 4 else { return }
         travelPosition = position; travelTime = now
         if preferences.haptics { UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.3) }

@@ -49,3 +49,35 @@ The installed build is development-signed for one provisioned device, bundle ID 
 Remaining: verify paid Apple Developer enrollment and App Store Connect access; finish app icon/privacy-manifest and permissions/privacy disclosures; archive a Release build with distribution signing and an unused build number; validate it; obtain user approval before upload or distribution. Configure beta information and reviewer access, then invite testers through TestFlight. The first external beta requires Apple's review. Each phone must pair separately and receive its own downloaded maps. The current ten-minute pairing code is unsuitable as a static review credential; arrange reviewer access without embedding server secrets.
 
 References: [TestFlight](https://developer.apple.com/testflight/), [provide beta test information](https://developer.apple.com/help/app-store-connect/test-a-beta-version/provide-test-information).
+
+## Routes and walking regression update — November 14
+
+- Added a Routes bottom tab, one-tap recording entry, saved building selection, named From/To endpoints, saved-route directions, and collapsed map tools. Recording labels are trimmed and blank or identical endpoints cannot start recording. Each route retains its scan ID, world map, physical landmark IDs and measured path. Building-name equality never creates a geometric connection.
+- Compared Waypoint's [route follower](https://github.com/sachin-khanal/uva-gwc-ghh-2026/blob/main/Package/WaypointCore/Sources/WaypointCore/Routing/RouteFollower.swift) and [feedback planner](https://github.com/sachin-khanal/uva-gwc-ghh-2026/blob/main/Package/WaypointCore/Sources/WaypointCore/Guidance/FeedbackPlanner.swift) with the existing local follower and guidance delivery. Both use bounded progress projection, lookahead, stabilized headings and prioritized feedback. No Waypoint implementation or README was copied. This is a targeted comparison, not a complete feature-parity or physical-accuracy certification.
+- New synthetic tests reproduced missing rounded-corner cues and a level-change warning being replaced with ordinary forward guidance. Fixed both in the existing local presentation layer, preserving tracking, arrival confirmation and the OpenAI tool bridge.
+- Walking scenarios: 0.8 / 1.4 / 1.8 metres per second, forward/reverse, sideways motion, heading wobble, a nearby parallel return corridor, rounded turns and unknown-floor elevation changes. All measurements are synthetic. No actual building geometry or physical accuracy was generated.
+- Swift baseline: 126 passing tests; after changes: 131 passing. Backend: 24 passing. The existing 5,000-vertex/1,000-update desktop benchmark was 7.429 ms before and 7.657 ms after; this small single-run variation is not evidence of an improvement or regression in iPhone frame rate. Physical sensor latency and accuracy remain unmeasured.
+
+Physical acceptance: name and record a real starting landmark and destination in Friend Center; save and publish; start a new session and follow the recorded walk with a companion. Check turn cues against actual corners, then test a destination change, stationary camera occlusion/recovery, and correct-room arrival confirmation. Repeat with the Mac off over cellular and then with the downloaded route offline. Record failures, landmark residuals and diagnostic snapshots; do not record a pass before performing the walk. Reverse direction also needs a physical walk: passing the synthetic reverse-path test does not certify reverse access through doors or stairs.
+
+### Confirmed walking-test destinations
+
+The user selected **Main entrance → Room 006** and **Main entrance → Room 008**, downstairs in Friend Center. These are two separate recordings; the room numbers do not establish a floor label or route geometry.
+
+1. Open **Routes → Record route**. Select Friend Center, enter **Main entrance** as From and **Room 006** as To. Start at a recognizable entrance landmark, record the actual walk downstairs, and save at the room sign. Repeat separately for Room 008.
+2. Return to that same entrance landmark. Start the saved route in a fresh session and establish positioning. Walk normally with a companion; check each corner and level-change cue against the real path.
+3. At the destination, confirm the actual room sign. Record any early, missed or incorrect announcement and export start/end diagnostics. Do not mark an uncertain floor or room as verified.
+4. Test camera occlusion while stationary, recovery at a known landmark, and the downloaded route offline. Only test a voice destination switch where the saved maps have an established shared coordinate frame; matching building names alone do not align recordings.
+
+Focused UI verification: the Routes recording, prefilled room recording, and production guidance/mute tests passed (3 tests). After the final From/To layout adjustment, both recording tests passed again (2 tests, 51.640 seconds). These results do not substitute for the physical walks above.
+
+Updated generic iPhone Release build: succeeded with existing signing configuration. Existing audio/ARKit deprecation warnings remain. Installation of this update was not performed: Xcode could not discover the previously connected physical iPhone. Reconnect and unlock the phone before installing and walking these routes. These changes are local and have not been pushed or deployed.
+
+### Outdoor distance and approach feedback
+
+- Outdoor guidance now shows estimated feet remaining along all remaining route legs, rounded to five feet. Next-turn distances also use feet. This is route distance, not a measured doorway distance.
+- The top arrow has a subtle red glow for getting closer and blue for moving farther along the route. Text accompanies color. Two successive fixes must show displacement larger than the combined GPS accuracy estimates; stale, inaccurate or uncertain positioning removes the trend. The indicator never confirms arrival.
+- Added a separate phone-facing compass label with heading-quality/freshness checks and portrait/landscape handling. It does not equate phone orientation with walking direction or gaze. Existing movement-course guidance remains separate.
+- Requested Core Location's navigation accuracy mode; this is not a guarantee of improved physical accuracy or delivery frequency. No GPS precision, sensor latency or close-proximity performance measurement was fabricated.
+- Travel feedback uses the supplied MP3 at low volume, at least two seconds apart while reliable navigation updates continue. Speech, warnings and mute take precedence. Failed map requests retry with increasing intervals up to 60 seconds and preserve a loaded route.
+- Core tests: 136 passed, including noise rejection, repeated approach evidence, stale-position recovery and total remaining route distance. Physical tests must check feet estimates at known outdoor landmarks, compass orientation, absence of false red/blue flicker while stationary, and loss/recovery of GPS. Map-request retries and audible timing still require a device/network test.

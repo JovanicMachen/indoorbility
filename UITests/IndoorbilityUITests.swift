@@ -16,6 +16,23 @@ final class IndoorbilityUITests: XCTestCase {
         openSettingsTool("Demo navigation")
     }
 
+    func testFullScreenLeftSwipeReturnsFromSearchAndSettings() throws {
+        app.tabBars.buttons["Home"].tap()
+        let field = app.textFields["destinationSearch"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap(); field.typeText("Room 006")
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.42))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.42))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "Search destinations")
+        settingsRoot()
+        app.buttons["AI connection"].tap()
+        XCTAssertTrue(app.navigationBars["AI connection"].waitForExistence(timeout: 5))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+    }
+
     func testProductionGuidanceSimulationAndMute() throws {
         settingsRoot()
         reveal(app.buttons["AI connection"])
@@ -36,6 +53,24 @@ final class IndoorbilityUITests: XCTestCase {
         if mute.value as? String != "1" { mute.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap() }
         XCTAssertEqual(mute.value as? String, "1")
         mute.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+    }
+
+    func testRoutesTabRecordsBetweenNamedPlaces() throws {
+        app.tabBars.buttons["Routes"].tap()
+        XCTAssertTrue(app.navigationBars["Routes"].waitForExistence(timeout: 5))
+        app.buttons["recordRoute"].tap()
+        let building = app.textFields["Building name"]
+        XCTAssertTrue(building.waitForExistence(timeout: 5))
+        building.tap(); building.typeText("Friend Center")
+        let destination = app.textFields["Room or destination"]
+        destination.tap(); destination.typeText("Library door")
+        let start = app.textFields["Start location"]
+        start.tap(); start.typeText("Main elevator")
+        XCTAssertEqual(building.value as? String, "Friend Center")
+        XCTAssertEqual(destination.value as? String, "Library door")
+        XCTAssertEqual(start.value as? String, "Main elevator")
+        XCTAssertFalse(app.textFields["Floor label (confirm from building signage)"].isHittable)
+        XCTAssertFalse(app.buttons["Start recording"].isEnabled) // Simulator cannot record LiDAR.
     }
 
     func testKnownRoomBuildingDirectionsOpensGPSWithoutSearch() throws {

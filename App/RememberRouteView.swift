@@ -25,12 +25,26 @@ struct RememberRouteView: View {
     @Environment(\.scenePhase) private var phase
     @Environment(\.dismiss) private var dismiss
     private var onFinished: (() -> Void)?
+    private var labelsValid: Bool {
+        let values = [building, entrance, room].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return values.allSatisfy { !$0.isEmpty } && values[1].caseInsensitiveCompare(values[2]) != .orderedSame
+    }
+    private var savedBuildings: [String] {
+        Array(Set(library.scans.map(\.name))).sorted()
+    }
     init(settings: AppStore, knownRoom: FriendCenter.Room? = nil, requestedRoom: RoomMappingRequest? = nil, onFinished: (() -> Void)? = nil) {
         self.settings = settings; self.onFinished = onFinished
         _editDestination = State(initialValue: requestedRoom == nil && knownRoom == nil)
         _building = State(initialValue: requestedRoom?.building ?? (knownRoom == nil ? "" : FriendCenter.name))
         _room = State(initialValue: requestedRoom.map { "Room " + $0.room } ?? knownRoom.map { "Room " + $0.id } ?? "")
         _floorLabel = State(initialValue: requestedRoom?.verifiedFloor ?? knownRoom?.level ?? "")
+    }
+    private var startField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("From").font(.headline)
+            TextField("For example, main elevator", text: $entrance)
+                .accessibilityLabel("Start location")
+        }
     }
     var body: some View {
         Group {
@@ -57,12 +71,20 @@ struct RememberRouteView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Let’s record your route").font(.largeTitle.bold())
-                            Text("Start at a familiar spot and walk to your destination.").foregroundStyle(.secondary)
+                            Text("Record a route").font(.largeTitle.bold())
+                            Text("Link two places in the same building.").foregroundStyle(.secondary)
                         }
                         VStack(alignment: .leading, spacing: 14) {
                             if building.isEmpty || room.isEmpty || editDestination {
+                                Text("Building").font(.headline)
                                 TextField("Building name", text: $building)
+                                if !savedBuildings.isEmpty {
+                                    Menu("Use saved building") {
+                                        ForEach(savedBuildings, id: \.self) { name in Button(name) { building = name } }
+                                    }
+                                }
+                                startField
+                                Text("To").font(.headline)
                                 TextField("Room or destination", text: $room)
                             } else {
                                 HStack(alignment: .top) {
@@ -76,9 +98,11 @@ struct RememberRouteView: View {
                                 }
                             }
                             Divider()
-                            Text("Start location").font(.headline)
-                            TextField("For example, main elevator", text: $entrance)
-                                .accessibilityLabel("Start location")
+                            if !editDestination && !building.isEmpty && !room.isEmpty { startField }
+                            if !entrance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                               entrance.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(room.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame {
+                                Text("Choose different start and destination names.").font(.footnote)
+                            }
                             DisclosureGroup("Optional details") {
                                 TextField("Floor label (optional)", text: $floorLabel)
                                     .accessibilityIdentifier("Floor label (confirm from building signage)")
@@ -86,12 +110,15 @@ struct RememberRouteView: View {
                         }.textFieldStyle(.roundedBorder).padding(20)
                             .background(Color.indoorCard, in: RoundedRectangle(cornerRadius: 24))
                         Button {
+                            building = building.trimmingCharacters(in: .whitespacesAndNewlines)
+                            room = room.trimmingCharacters(in: .whitespacesAndNewlines)
+                            entrance = entrance.trimmingCharacters(in: .whitespacesAndNewlines)
                             stage = 1; error = nil; capturedDraft = nil; scanning = true
                         } label: {
                             Text("Start recording").font(.headline).frame(maxWidth: .infinity, minHeight: 48)
                         }.buttonStyle(.borderedProminent).controlSize(.large)
-                            .disabled(!SpatialSession.supportsLiDAR || [building, room, entrance].contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
-                        Text(SpatialSession.supportsLiDAR ? "Walk to your destination, then save." : "Recording requires a LiDAR-equipped iPhone or iPad.")
+                            .disabled(!SpatialSession.supportsLiDAR || !labelsValid)
+                        Text(SpatialSession.supportsLiDAR ? "Stand at your starting landmark, then record your walk." : "Recording requires a LiDAR-equipped iPhone or iPad.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }.padding(24)
                 }.scrollDismissesKeyboard(.interactively).background(Color.indoorBackground)
@@ -180,7 +207,7 @@ struct RememberRouteView: View {
             }
     }
     private func save() {
-        guard !saving else { return }
+        guard !saving, labelsValid else { return }
         guard stage == 3, (capturedDraft != nil || (camera.running && camera.position != nil && camera.canSave)) else {
             error = "Hold still and look around to finish saving."
             settings.speak(error!, force: true); return

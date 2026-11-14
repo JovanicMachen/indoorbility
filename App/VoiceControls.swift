@@ -1,4 +1,5 @@
 import SwiftUI
+import IndoorbilityCore
 
 // Attach to this view's own window so tab bars, sheets and bottom controls cannot clip the halo.
 struct VoiceEdgeGlow: View {
@@ -243,6 +244,12 @@ struct NavigationAccessibilitySheet: View {
 struct DirectionBadge: View {
     let instruction: String
     let reliable: Bool
+    var proximity: ApproachFeedback.Trend = .steady
+    var distanceText: String? = nil
+    private var glow: Color {
+        guard reliable else { return .clear }
+        return proximity == .closer ? .red : proximity == .farther ? .blue : .clear
+    }
     private var symbol: String {
         guard reliable else { return "pause.fill" }
         let text = instruction.lowercased()
@@ -254,14 +261,94 @@ struct DirectionBadge: View {
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: symbol).font(.system(size: 64, weight: .bold))
+                .shadow(color: glow.opacity(0.4), radius: 16)
                 .accessibilityHidden(true)
             Text(reliable ? instruction : "Guidance paused")
                 .font(.headline).multilineTextAlignment(.center)
+            if reliable, let distanceText { Text(distanceText).font(.subheadline).monospacedDigit() }
+            if reliable, proximity != .steady {
+                Text(proximity == .closer ? "Getting closer" : "Moving farther")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .foregroundStyle(Color.indoorTeal).padding(18)
         .frame(maxWidth: 310)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
         .padding(.horizontal).accessibilityElement(children: .combine)
         .accessibilityIdentifier("liveDirectionBadge")
+    }
+}
+
+/// Recognize horizontal intent before competing with scrolling or result-card taps.
+private struct PageBackSwipe: UIViewRepresentable {
+    var enabled: Bool
+    var action: () -> Void
+    func makeUIView(context: Context) -> BackSwipeView { BackSwipeView() }
+    func updateUIView(_ view: BackSwipeView, context: Context) {
+        view.action = action; view.enabled = enabled
+    }
+    static func dismantleUIView(_ view: BackSwipeView, coordinator: ()) { view.detach() }
+}
+private final class BackSwipeView: UIView, UIGestureRecognizerDelegate {
+    var action: (() -> Void)?
+    var enabled = true
+    private weak var attachedWindow: UIWindow?
+    private lazy var pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        detach()
+        guard let window else { return }
+        pan.delegate = self; pan.cancelsTouchesInView = true
+        window.addGestureRecognizer(pan); attachedWindow = window
+    }
+    func detach() { attachedWindow?.removeGestureRecognizer(pan); attachedWindow = nil }
+    private func owner(of view: UIView) -> UIViewController? {
+        var responder: UIResponder? = view
+        while let current = responder {
+            if let controller = current as? UIViewController { return controller }
+            responder = current.next
+        }
+        return nil
+    }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        guard enabled, !UIAccessibility.isVoiceOverRunning, let window, let touched = touch.view,
+              convert(bounds, to: window).contains(touch.location(in: window)),
+              let ownController = owner(of: self), owner(of: touched) === ownController else { return false }
+        var view: UIView? = touched
+        while let current = view {
+            if current is UISlider || current is UISwitch { return false }
+            view = current.superview
+        }
+        return true
+    }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        other.view is UIScrollView
+    }
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        let velocity = pan.velocity(in: window)
+        return velocity.x < -abs(velocity.y) * 2
+    }
+    @objc private func panned(_ recognizer: UIPanGestureRecognizer) {
+        guard recognizer.state == .ended else { return }
+        let offset = recognizer.translation(in: window)
+        if offset.x < -90 && abs(offset.x) > abs(offset.y) * 2 { action?() }
+    }
+}
+struct SwipeLeftBackModifier: ViewModifier {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.isPresented) private var isPresented
+    @State private var active = true
+    var action: (() -> Void)?
+    func body(content: Content) -> some View {
+        content.background(PageBackSwipe(enabled: active && (action != nil || isPresented)) {
+            if let action { action() } else { dismiss() }
+        })
+        .onAppear { active = true }
+        .onDisappear { active = false }
+    }
+}
+extension View {
+    func swipeLeftToGoBack(action: (() -> Void)? = nil) -> some View {
+        modifier(SwipeLeftBackModifier(action: action))
     }
 }
