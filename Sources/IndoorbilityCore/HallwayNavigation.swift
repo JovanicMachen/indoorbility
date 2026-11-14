@@ -108,6 +108,12 @@ public struct HallwayFollower {
     public private(set) var cameraHeading: Float?
     public private(set) var movementHeading: Float?
     public var selectedSegment: Int { segmentIndex(at: progress) }
+    /// GPS mode: the live AR session has relocalized into the saved map, so poses are
+    /// already in map coordinates. The follower then places you anywhere on the path,
+    /// starts and recovers by itself, and announces arrival — like a normal GPS.
+    public private(set) var localized = false
+    private var offPathSide: String?
+    private var lostSince: TimeInterval?
     private var movementAnchor: SpatialPoint?
     private var retreatSince: TimeInterval?
     private var confirmed = false
@@ -154,6 +160,16 @@ public struct HallwayFollower {
               abs(position.y-route.entrance.position.y) < 0.8 else { throw MapError.invalid("Wait for stable tracking at the marked entrance, or use landmark recovery.") }
         confirmed = true; progress = 0; remaining = totalDistance; state = .guiding; instruction = "Follow the reviewed hallway."
     }
+    /// A relocalized world map provides the transform. A user-confirmed nearby
+    /// landmark checks it; a room label alone never establishes a transform.
+    public mutating func recoverInSavedMap(livePosition: SpatialPoint, landmark: SpatialPoint, relocalized: Bool) throws {
+        guard relocalized, livePosition.isFinite, landmark.isFinite,
+              livePosition.horizontalDistance(to: landmark) <= 1.2,
+              abs(livePosition.y-landmark.y) < 0.8 else {
+            throw MapError.invalid("Position does not match this landmark. Try another mark.")
+        }
+        try recover(using: .identity, livePosition: livePosition)
+    }
     public mutating func recover(using alignment: ScanAlignment, livePosition: SpatialPoint) throws {
         guard stable else { throw MapError.invalid("Wait for stable camera tracking before confirming recovery.") }
         let p = alignment.apply(livePosition)
@@ -174,7 +190,15 @@ public struct HallwayFollower {
         self.alignment = alignment; position = p; progress = projection.along; remaining = max(0, totalDistance-progress)
         confirmed = true; state = .guiding; previousPose = nil; previousTime = nil; arrivalSince = nil; offSince = nil
     }
+    /// Switch to GPS mode once the saved map is matched (alignment becomes identity).
+    public mutating func setLocalized() {
+        guard !localized else { return }
+        localized = true; alignment = .identity; confirmed = false; stableSince = nil; lostSince = nil
+        previousTime = nil; previousPose = nil; offSince = nil; retreatSince = nil; arrivalSince = nil
+        if state != .arrived { state = .locating; instruction = "Map matched. Finding your place on the path." }
+    }
     public mutating func update(position live: SpatialPoint?, heading: Float?, time: TimeInterval, trackingNormal: Bool, routeAvailable: Bool = true) {
+        if localized { updateLocalized(position: live, heading: heading, time: time, trackingNormal: trackingNormal, routeAvailable: routeAvailable); return }
         guard routeAvailable else { invalidate("This hallway is reported closed. No alternative has been mapped."); state = .blocked; return }
         guard trackingNormal, let live, live.isFinite, heading.map({ $0.isFinite }) ?? true, time.isFinite else { invalidate(); return }
         if let prior = previousTime, time <= prior || time-prior > 0.8 { invalidate("Tracking was interrupted. Confirm a landmark to continue.") }
@@ -190,7 +214,7 @@ public struct HallwayFollower {
         if let anchor = movementAnchor, p.horizontalDistance(to: anchor) >= 0.3 {
             movementHeading = atan2(p.z-anchor.z, p.x-anchor.x); movementAnchor = p
         } else if movementAnchor == nil { movementAnchor = p }
-        guard confirmed else { if state != .offRoute { state = .ready }; instruction = "Confirm the marked entrance, or recover at a known landmark."; return }
+        guard confirmed else { if state != .offRoute { state = .ready }; instruction = "Confirm your location to begin."; return }
         if state == .arrived { return }
         let projection = project(p, minimum: max(0, progress-1.5), maximum: min(totalDistance, progress+2.5))
         let off = projection.distance > 1.5
@@ -228,6 +252,100 @@ public struct HallwayFollower {
         }
         instruction = "Continue straight."
 
+    }
+    private mutating func updateLocalized(position live: SpatialPoint?, heading: Float?, time: TimeInterval, trackingNormal: Bool, routeAvailable: Bool) {
+        guard routeAvailable else { invalidate("This hallway is reported closed. No alternative has been mapped."); state = .blocked; return }
+        guard trackingNormal, let live, live.isFinite, heading.map({ $0.isFinite }) ?? true, time.isFinite else {
+            // Ride through brief camera hiccups silently while guiding.
+            if state == .guiding, time.isFinite {
+                if lostSince == nil { lostSince = time }
+                if time - (lostSince ?? time) < 2 { previousPose = nil; return }
+            }
+            // Wait for tracking to come back; no manual recovery needed in GPS mode.
+            stable = false; stableSince = nil; previousTime = nil; previousPose = nil; position = nil
+            offSince = nil; retreatSince = nil; arrivalSince = nil
+            if state != .arrived { state = .trackingLost; instruction = "Finding your position. Look around slowly." }
+            return
+        }
+        if let prior = previousTime, time <= prior { return }
+        if let prior = previousTime, time-prior > 2 { stableSince = nil }
+        lostSince = nil
+        // ARKit snaps the pose when it refines the saved-map match. Treat that as a
+        // correction: settle briefly and re-place on the path instead of giving up.
+        if let prior = previousTime, let pose = previousPose, live.distance(to: pose) > max(0.6, Float(time-prior)*2.5) {
+            if state != .guiding { stableSince = nil }
+            confirmed = false // re-place on the whole path next
+        }
+        previousTime = time; previousPose = live
+        if stableSince == nil { stableSince = time }
+        stable = time - (stableSince ?? time) >= 0.5
+        guard stable || state == .guiding else {
+            if state != .arrived { instruction = "Finding your position. Look around slowly." }
+            return
+        }
+        let p = alignment.apply(live); position = p
+        cameraHeading = heading.map(alignment.heading)
+        if let anchor = movementAnchor, p.horizontalDistance(to: anchor) >= 0.3 {
+            movementHeading = atan2(p.z-anchor.z, p.x-anchor.x); movementAnchor = p
+        } else if movementAnchor == nil { movementAnchor = p }
+        if state == .arrived { return }
+        // While a pose correction settles, keep following but don't commit to a far jump.
+        if !stable { return }
+        var projection = confirmed ? project(p, minimum: max(0, progress-4), maximum: min(totalDistance, progress+6))
+                                   : project(p, minimum: 0, maximum: totalDistance)
+        if confirmed && projection.distance > 1.0 {
+            let global = project(p, minimum: 0, maximum: totalDistance)
+            if global.distance + 0.5 < projection.distance { projection = global }
+        }
+        if projection.distance > 2.0 {
+            arrivalSince = nil; retreatSince = nil
+            if offSince == nil { offSince = time }
+            if !confirmed || time - (offSince ?? time) >= 1.0 {
+                confirmed = false; state = .offRoute
+                let target = point(at: projection.along)
+                let side = Self.side(of: target, from: p, heading: cameraHeading, previous: offPathSide)
+                offPathSide = side
+                instruction = "Off the path. The path is \(side)."
+            }
+            return
+        }
+        offSince = nil; offPathSide = nil
+        if !confirmed { confirmed = true; retreatSince = nil }
+        progress = projection.along; remaining = max(0, totalDistance-progress)
+        if remaining < 1.5 && p.horizontalDistance(to: route.room.position) <= 1.5 {
+            if arrivalSince == nil { arrivalSince = time }
+            if time - (arrivalSince ?? time) >= 1 {
+                state = .arrived; progress = totalDistance; remaining = 0
+                instruction = "You have arrived at \(route.room.label)."; return
+            }
+        } else { arrivalSince = nil }
+        state = .guiding
+        // Facing back along the path for a moment → "Turn around".
+        if let facing = cameraHeading, remaining > 1.5 {
+            let ahead = point(at: min(totalDistance, progress+1.5))
+            let pathHeading = atan2(ahead.z-p.z, ahead.x-p.x)
+            let delta = abs(atan2(sin(pathHeading-facing), cos(pathHeading-facing)))
+            if p.horizontalDistance(to: ahead) > 0.3, delta > 2.2 {
+                if retreatSince == nil { retreatSince = time }
+                if time - (retreatSince ?? time) >= 1.5 { instruction = "Turn around."; return }
+            } else { retreatSince = nil }
+        }
+        let target = point(at: min(totalDistance, progress+3))
+        if includesLevelChange && abs(target.y-p.y) > 0.45 {
+            instruction = target.y > p.y ? "Stairs or ramp up ahead. Use the handrail." : "Stairs or ramp down ahead. Use the handrail."
+            return
+        }
+        instruction = "Continue straight."
+    }
+    /// Plain-language side of a point relative to where the camera faces (x–z map plane,
+    /// positive angle = clockwise from above = to the right).
+    static func side(of target: SpatialPoint, from p: SpatialPoint, heading: Float?, previous: String?) -> String {
+        guard let heading else { return previous ?? "nearby" }
+        let bearing = atan2(target.z-p.z, target.x-p.x)
+        let delta = atan2(sin(bearing-heading), cos(bearing-heading)) * 180 / .pi
+        if abs(delta) < 35 { return "ahead of you" }
+        if abs(delta) > 145 { return "behind you" }
+        return delta > 0 ? "to your right" : "to your left"
     }
     public mutating func confirmArrival() throws {
         guard state == .nearRoom, stable, let p = position, p.distance(to: route.room.position) <= 0.8 else {
@@ -293,6 +411,7 @@ public extension HallwayFollower {
             entrance: backwards ? reviewed.room : reviewed.entrance, room: target, path: path, confirmedAt: reviewed.confirmedAt, stairFloors: backwards ? reviewed.stairFloors.map { .init(start: $0.end, end: $0.start) } : reviewed.stairFloors)
         try replacement.validate(for: draft)
         var result = HallwayFollower(route: replacement)
+        result.localized = localized
         result.stable = stable; result.stableSince = stableSince
         result.alignment = alignment; result.position = position
         let projection = result.project(position, minimum: 0, maximum: replacement.distance)

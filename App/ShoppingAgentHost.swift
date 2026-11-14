@@ -53,6 +53,7 @@ import IndoorbilityCore
         if validated { ledger.record(call, result: result) }
         return result
     }
+    func presentClarification(_ text: String) { voiceResponse = text; speak(text) }
     func presentAgentResult(_ result: AgentToolResult) {
         guard result.sessionRevision == agentContext().sessionRevision else { return }
         voiceResponse = result.userSafeExplanation; speak(result.userSafeExplanation)

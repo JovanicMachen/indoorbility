@@ -69,7 +69,7 @@ import SwiftUI
                         self.transcript = text
                         self.silence?.cancel()
                         self.silence = Task { [weak self] in
-                            try? await Task.sleep(for: .seconds(1.5))
+                            try? await Task.sleep(for: .seconds(2.5))
                             guard !Task.isCancelled, self?.token == current else { return }
                             self?.finish()
                         }
@@ -78,16 +78,18 @@ import SwiftUI
                         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { self.fail(Self.notUnderstood); return }
                         // On-device final segments can report zero confidence; that is not proof of silence.
                         // Destination resolution and confirmation still validate recognized requests.
-                        let handler = self.completion
-                        self.cancel(); self.status = "Heard: \(text)"
-                        handler?(text)
-                    } else if error != nil { self.fail(Self.notUnderstood) }
+                        self.deliver(text)
+                    } else if error != nil {
+                        // The recognizer can end with an error after delivering usable text.
+                        // Submit once on termination; never execute changing partial results.
+                        self.deliverOrFail()
+                    }
                 }
             }
             engine.prepare(); try engine.start()
             listening = true; status = "Listening… Say one command, then tap Done."
             timeout = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(8))
+                try? await Task.sleep(for: .seconds(20))
                 guard !Task.isCancelled, self?.token == current else { return }
                 self?.finish()
             }
@@ -102,8 +104,18 @@ import SwiftUI
         timeout = Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled, self?.token == current else { return }
-            self?.fail(Self.notUnderstood)
+            self?.deliverOrFail()
         }
+    }
+    func clearTranscript() { transcript = "" }
+    private func deliverOrFail() {
+        let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { fail(Self.notUnderstood) } else { deliver(text) }
+    }
+    private func deliver(_ text: String) {
+        let handler = completion
+        cancel(); status = "Heard: \(text)"
+        handler?(text)
     }
     func cancel() {
         token = UUID(); timeout?.cancel(); timeout = nil; silence?.cancel(); silence = nil

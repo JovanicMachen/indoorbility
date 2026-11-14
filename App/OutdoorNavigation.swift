@@ -29,6 +29,13 @@ import IndoorbilityCore
         guard requested, let value = locations.last, value.horizontalAccuracy >= 0,
               abs(value.timestamp.timeIntervalSinceNow) < 10 else { return }
         guard location.map({ value.timestamp > $0.timestamp }) ?? true else { return }
+        if let previous = location {
+            let elapsed = value.timestamp.timeIntervalSince(previous.timestamp)
+            let jump = value.distance(from: previous)
+            if elapsed > 0, elapsed < 4, jump > max(35, value.horizontalAccuracy + previous.horizontalAccuracy + elapsed * 4) {
+                return
+            }
+        }
         let now = ProcessInfo.processInfo.systemUptime
         let metrics = NavigationPerformance.shared
         if let previous = location { metrics.record("GPS capture interval ms", value.timestamp.timeIntervalSince(previous.timestamp)*1000) }
@@ -92,7 +99,7 @@ struct OutdoorRouteView: View {
     var initialRoom: String? = nil
     @StateObject private var location = OutdoorLocation()
     @StateObject private var camera = SpatialSession()
-    @State private var showingMap = true
+    @State private var showingMap = false
     @State private var mapPosition: MapCameraPosition = .automatic
     @State private var trail = OutdoorTrace()
     @State private var trailOrigin: MKMapPoint?
@@ -131,6 +138,9 @@ struct OutdoorRouteView: View {
     @State private var presented = false
     @State private var approachDistance: Double?
     @State private var started = false
+    /// When GPS started; the first route waits briefly for a settled fix instead of
+    /// building turn-by-turn directions from a 25 m guess.
+    @State private var gpsStartedAt = Date()
     @Environment(\.scenePhase) private var phase
     var body: some View {
         let _ = NavigationPerformance.shared.bodyEvaluated("Outdoor navigation")
@@ -149,6 +159,19 @@ struct OutdoorRouteView: View {
                                 .background(.regularMaterial, in: Circle())
                         }.accessibilityLabel("End directions")
                         Spacer()
+                        Button { showingMap.toggle() } label: {
+                            Label(showingMap ? "Camera" : "Map", systemImage: showingMap ? "camera" : "map")
+                                .padding(12).background(.regularMaterial, in: Capsule())
+                        }
+                        Menu {
+                            Button("I’m already inside", action: confirmInside)
+                            if UserDefaults.standard.bool(forKey: "agentDeveloperMode") {
+                                ShareLink("Export timing", item: NavigationPerformance.shared.lines.joined(separator: "\n"))
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                                .background(.regularMaterial, in: Circle())
+                        }.accessibilityLabel("Navigation options")
                     }.padding()
                     if !showingMap, !insideBuilding, !(nearBuilding && !continueOutside && route == nil) {
                         DirectionBadge(instruction: walking?.wrongWay == true ? "Turn around when safe" : walking?.instruction.isEmpty == false ? walking!.travelInstruction : "Continue along the mapped path", reliable: walking?.status == .guiding, proximity: approach.trend, distanceText: destinationDistanceText)
@@ -160,22 +183,8 @@ struct OutdoorRouteView: View {
             ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if let awarenessMessage { Label(awarenessMessage, systemImage: "exclamationmark.triangle.fill").font(.subheadline).foregroundStyle(Color.indoorTeal).fixedSize(horizontal: false, vertical: true) }
-                Text(indoor?.route.room.label ?? destination.name ?? "Destination").font(.title2.bold())
-                    .multilineTextAlignment(.center).frame(maxWidth: .infinity)
-                if automaticallyStart && !showingMap && !insideBuilding {
-                    outdoorMap.frame(height: 90).clipShape(RoundedRectangle(cornerRadius: 18))
-                        .allowsHitTesting(false)
-                        .overlay { Color.clear.contentShape(Rectangle()).onTapGesture { showingMap = true }
-                            .gesture(DragGesture(minimumDistance: 25).onEnded { value in if abs(value.translation.width) > abs(value.translation.height) { showingMap = true } }) }
-                        .accessibilityElement(children: .ignore).accessibilityLabel("Show outdoor map").accessibilityAddTraits(.isButton)
-                        .accessibilityAction { showingMap = true }
-                }
-                if automaticallyStart {
-                    Picker("Directions view", selection: $showingMap) { Text("Camera").tag(false); Text("Map").tag(true) }
-                        .pickerStyle(.segmented)
-                        .simultaneousGesture(DragGesture(minimumDistance: 25).onEnded { value in
-                            if abs(value.translation.width) > abs(value.translation.height) { showingMap = value.translation.width > 0 }
-                        })
+                if !automaticallyStart || showingMap || insideBuilding {
+                    Text(indoor?.route.room.label ?? destination.name ?? "Destination").font(.headline)
                 }
                 if let indoor { Text("Via \(indoor.draft.name) · \(indoor.route.entrance.label)").foregroundStyle(.secondary) }
                 if insideBuilding {
@@ -191,15 +200,17 @@ struct OutdoorRouteView: View {
                     Text("You’re near this destination").font(.headline)
                     Text("Are you already inside? Choose a room to use a saved route or record one.")
                     Button("Yes, I’m inside", action: confirmInside).buttonStyle(.borderedProminent).frame(maxWidth: .infinity)
-                    Button("No, show outdoor directions") { continueOutside = true; Task { await calculate() } }.buttonStyle(.bordered)
+                    Button("No, show outdoor directions") { continueOutside = true; Task { await calculate(force: true) } }.buttonStyle(.bordered)
                     HoldToTalk(voice: roomVoice, before: { settings.stopSpeech() }, onUnrecognized: { settings.speak(VoiceCommandInput.notUnderstood) }, haptics: settings.preferences.haptics, diameter: 64) { text in
                         let answer = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
                         if ["yes", "yes please", "i'm inside", "i’m inside"].contains(answer) { confirmInside() }
-                        else if ["no", "outside", "no thanks"].contains(answer) { continueOutside = true; Task { await calculate() } }
+                        else if ["no", "outside", "no thanks"].contains(answer) { continueOutside = true; Task { await calculate(force: true) } }
                         else { settings.speak("Say yes if you are inside, or no for outdoor directions.") }
                     }
                 } else {
-                    Button("I’m already inside", action: confirmInside).buttonStyle(.borderedProminent).frame(maxWidth: .infinity)
+                    if !automaticallyStart {
+                        Button("I’m already inside", action: confirmInside).buttonStyle(.borderedProminent).frame(maxWidth: .infinity)
+                    }
                 if automaticallyStart && !showingMap {
                     walkingInstruction
                     if let cameraError = camera.error {
@@ -210,7 +221,7 @@ struct OutdoorRouteView: View {
                 if showingMap { walkingInstruction }
                 if let route, !automaticallyStart || showingMap {
                     Text("\(route.distance.formatted(.number.precision(.fractionLength(0)))) m outdoors")
-                    Text("Apple walking route · step-free access has not been verified").font(.footnote).foregroundStyle(.secondary)
+                    Text("Locked walking path · GPS is snapped to this route. Step-free access has not been verified").font(.footnote).foregroundStyle(.secondary)
                     if settings.preferences.avoidStairs {
                         Text("Your no-stairs constraint applies to reviewed indoor paths. This outdoor route cannot be confirmed step-free.").font(.footnote)
                     }
@@ -220,20 +231,18 @@ struct OutdoorRouteView: View {
                         }
                     }
                 }
-                if UserDefaults.standard.bool(forKey: "agentDeveloperMode") {
-                    ShareLink("Export timing", item: NavigationPerformance.shared.lines.joined(separator: "\n"))
-                }
                 if !started {
-                    Button(settings.preferences.avoidStairs ? "Locate the destination" : indoor == nil ? "Show walking route" : "Begin journey") { started = true; location.start() }
+                    Button(settings.preferences.avoidStairs ? "Locate the destination" : indoor == nil ? "Show walking route" : "Begin journey") { started = true; gpsStartedAt = Date(); location.start() }
                         .buttonStyle(.borderedProminent).frame(minHeight: 44)
                 } else if settings.preferences.avoidStairs {
                     Text("No verified step-free outdoor route is available. The map shows the destination only; camera guidance can continue at a reviewed indoor entrance.").font(.subheadline)
-                } else if route == nil && error == nil { ProgressView(location.location == nil ? location.message : "Finding route…") }
-                if let error { Text(error).foregroundStyle(.secondary); Button("Try again") { self.error = nil; Task { await calculate() } } }
-                if indoor != nil { Text("Near the entrance, the camera will try to match your saved map and entrance sign. GPS alone will not start indoor guidance.").font(.footnote).foregroundStyle(.secondary) }
+                } else if route == nil && error == nil { ProgressView(location.location == nil ? location.message : (location.location?.horizontalAccuracy ?? 99) > 15 ? "Getting a precise GPS fix…" : "Finding route…") }
+                if let error { Text(error).foregroundStyle(.secondary); Button("Try again") { self.error = nil; Task { await calculate(force: true) } } }
+                if indoor != nil { Text("At the entrance, camera guidance on your saved 3D map takes over automatically.").font(.footnote).foregroundStyle(.secondary) }
                 }
-            }.padding(20)
-            }.frame(maxHeight: insideBuilding ? 420 : automaticallyStart && !showingMap ? 290 : 380)
+            }.padding(16)
+            }.fixedSize(horizontal: false, vertical: true)
+                .frame(maxHeight: insideBuilding ? 420 : automaticallyStart && !showingMap ? 290 : 380)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: automaticallyStart ? 28 : 0))
                 .padding(automaticallyStart ? 16 : 0)
             }
@@ -270,7 +279,8 @@ struct OutdoorRouteView: View {
             }
             .onChange(of: location.location) { _, fix in
                 guard let fix, started else { return }
-                nearBuilding = DestinationProximity.shouldOfferIndoorChoice(
+                // A saved indoor map already knows the room, so skip the "are you inside?" question.
+                nearBuilding = indoor == nil && DestinationProximity.shouldOfferIndoorChoice(
                     distance: fix.distance(from: CLLocation(latitude: destination.placemark.coordinate.latitude, longitude: destination.placemark.coordinate.longitude)),
                     accuracy: fix.horizontalAccuracy, age: abs(fix.timestamp.timeIntervalSinceNow))
                 guard !insideBuilding else { return }
@@ -285,9 +295,12 @@ struct OutdoorRouteView: View {
                     return
                 }
                 if !settings.preferences.avoidStairs && route == nil && directions == nil && error == nil { Task { await calculate() } }
-                guard indoor != nil, !presented, phase == .active, fix.horizontalAccuracy <= 20 else { return }
+                guard indoor != nil, !presented, phase == .active, fix.horizontalAccuracy <= 30 else { return }
                 let distance = fix.distance(from: CLLocation(latitude: destination.placemark.coordinate.latitude, longitude: destination.placemark.coordinate.longitude))
-                if distance < 50 { approachDistance = distance; camera.stop(); presented = true; location.stop() }
+                if distance < 50 {
+                    approachDistance = distance; camera.stop(); presented = true; location.stop()
+                    settings.speak("You're at \(indoor?.draft.name ?? "the building"). Switching to camera guidance.", force: true)
+                }
             }
             .fullScreenCover(isPresented: $presented, onDismiss: { started = false }) {
                 if let indoor { HallwayLaunchView(route: indoor.route, draft: indoor.draft, library: indoor.library, settings: settings, approachDistance: approachDistance) }
@@ -314,9 +327,9 @@ struct OutdoorRouteView: View {
                     guard UserDefaults.standard.bool(forKey: "depthAdvisories") else { return }
                     announceAwareness("Possible surface ahead, about " + LiveGuidance.distance(distance, feet: feet) + ". Pause and check your surroundings.")
                 }
-                if let initialRoom, roomQuery.isEmpty { roomQuery = initialRoom }; if automaticallyStart { started = true; location.start() } }
+                if let initialRoom, roomQuery.isEmpty { roomQuery = initialRoom }; if automaticallyStart { started = true; gpsStartedAt = Date(); location.start() } }
             .onDisappear { settings.updateJourneySound(active: false); camera.stop(); location.stop(); directions?.cancel(); directions = nil }
-            .onChange(of: phase) { _, value in if value != .active { settings.updateJourneySound(active: false); trail.interrupt(); walking?.pause(); settings.stopSpeech(); camera.stop(); location.stop(); directions?.cancel(); directions = nil; started = false } else if automaticallyStart && !arrived && !presented && roomRequest == nil && roomTarget == nil { started = true; location.start(); if !showingMap { Task { await camera.start(navigation: true) } } } }
+            .onChange(of: phase) { _, value in if value != .active { settings.updateJourneySound(active: false); trail.interrupt(); walking?.pause(); settings.stopSpeech(); camera.stop(); location.stop(); directions?.cancel(); directions = nil; started = false } else if automaticallyStart && !arrived && !presented && roomRequest == nil && roomTarget == nil { started = true; gpsStartedAt = Date(); location.start(); if !showingMap { Task { await camera.start(navigation: true) } } } }
     }
     private var outdoorMap: some View {
         Map(position: $mapPosition, interactionModes: [.pan, .zoom]) {
@@ -372,7 +385,7 @@ struct OutdoorRouteView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Outdoor guidance · GPS").font(.caption).foregroundStyle(.secondary)
             if let destinationDistanceText { Text(destinationDistanceText).font(.headline).monospacedDigit() }
-            if let heading = location.heading, abs(displayTime.timeIntervalSince(heading.timestamp)) <= 3 {
+            if showingMap, let heading = location.heading, abs(displayTime.timeIntervalSince(heading.timestamp)) <= 3 {
                 let degrees = heading.trueHeading >= 0 ? heading.trueHeading : heading.magneticHeading
                 let labels = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
                 Label("Phone facing " + labels[Int((degrees + 22.5) / 45) % 8], systemImage: "location.north.line")
@@ -387,7 +400,7 @@ struct OutdoorRouteView: View {
                     Label("Waiting for a reliable location", systemImage: "location.slash").font(.headline)
                 case .offRoute:
                     Text("You may be off the route; check the map.").font(.headline)
-                    Button("Find a new route") { settings.stopSpeech(); Task { await calculate() } }.buttonStyle(.borderedProminent)
+                    Button("Find a new route") { settings.stopSpeech(); Task { await calculate(force: true) } }.buttonStyle(.borderedProminent)
                 case .nearDestination:
                     Text("Near your destination—check the entrance.").font(.headline)
                     Button("I’m here") { settings.updateJourneySound(active: false); arrived = true; self.walking = nil; camera.stop(); location.stop(); settings.stopSpeech(); settings.speak("You’ve arrived at " + (destination.name ?? "your destination")); settings.cue(.arrived) }.buttonStyle(.borderedProminent)
@@ -428,7 +441,7 @@ struct OutdoorRouteView: View {
         } else if value.contains("repeat") { speakWalking(force: true) }
         else if value.contains("inside") { confirmInside() }
         else if value.contains("another way") || value.contains("new route") || value.contains("recalculate") {
-            Task { await calculate() }
+            Task { await calculate(force: true) }
         } else if value.contains("camera") { showingMap = false }
         else if value.contains("map") { showingMap = true }
         else if RoomMappingRequest.resolve(text, selectedBuilding: buildingName) != nil {
@@ -469,10 +482,10 @@ struct OutdoorRouteView: View {
             approach.update(distance: walking.remainingRouteDistance, accuracy: fix.horizontalAccuracy,
                             timestamp: fix.timestamp.timeIntervalSince1970, now: Date().timeIntervalSince1970)
         } else { approach.reset() }
-        if walking?.status == .offRoute, Date().timeIntervalSince(lastReplan) > 20, directions == nil, fix.horizontalAccuracy <= 20 {
+        if walking?.shouldReplaceRoute() == true, Date().timeIntervalSince(lastReplan) > 45, directions == nil, fix.horizontalAccuracy <= 12 {
             lastReplan = Date()
             settings.speak("Checking a new walking route.", priority: .direction)
-            Task { await calculate() }
+            Task { await calculate(force: true) }
         }
         speakWalking()
         let canTick = walking?.status == .guiding && walking?.wrongWay == false &&
@@ -530,8 +543,16 @@ struct OutdoorRouteView: View {
             error = nil
         } catch { self.error = error.localizedDescription }
     }
-    private func calculate() async {
-        guard !arrived, !insideBuilding, directions == nil, (!nearBuilding || continueOutside || route != nil), !settings.preferences.avoidStairs, let fix = location.location, fix.horizontalAccuracy <= 25, abs(fix.timestamp.timeIntervalSinceNow) <= 10 else { return }
+    private func calculate(force: Bool = false) async {
+        // First route: wait up to ~10 s for a ≤15 m fix, then accept ≤30 m.
+        // Re-routes need a good fix so a drifting position can't send you around the block.
+        let settling = route == nil && Date().timeIntervalSince(gpsStartedAt) < 10
+        let required: Double = route != nil ? 15 : settling ? 15 : 30
+        guard !arrived, !insideBuilding, directions == nil, (!nearBuilding || continueOutside || route != nil), !settings.preferences.avoidStairs, let fix = location.location, fix.horizontalAccuracy <= required, abs(fix.timestamp.timeIntervalSinceNow) <= 10 else { return }
+        if !force, route != nil, walking?.shouldReplaceRoute() != true {
+            error = nil
+            return
+        }
         let request = MKDirections.Request()
         request.source = MKMapItem(placemark: MKPlacemark(coordinate: fix.coordinate))
         request.destination = destination; request.transportType = .walking

@@ -19,6 +19,17 @@ final class HallwayNavigationTests: XCTestCase {
         try f.confirmEntrance()
         return f
     }
+    func testSavedMapRecoveryRequiresMatchingLandmarkAndStableTracking() throws {
+        var f = try ready()
+        XCTAssertThrowsError(try f.recoverInSavedMap(livePosition: p(5), landmark: p(5), relocalized: false))
+        XCTAssertThrowsError(try f.recoverInSavedMap(livePosition: p(5), landmark: p(9), relocalized: true))
+        XCTAssertThrowsError(try f.recoverInSavedMap(livePosition: SpatialPoint(x: 5, y: 3, z: 0), landmark: p(5), relocalized: true))
+        try f.recoverInSavedMap(livePosition: p(5), landmark: p(5), relocalized: true)
+        XCTAssertEqual(f.progress, 5, accuracy: 0.01)
+        XCTAssertEqual(f.state, .guiding)
+        f.invalidate()
+        XCTAssertThrowsError(try f.recoverInSavedMap(livePosition: p(5), landmark: p(5), relocalized: true))
+    }
     func testLiveDestinationChangeRetainsMeasuredPositionAndAlignment() throws {
         let original = draft()
         let middle = ScanLandmark(label: "Room 105", kind: "room", position: p(6))
@@ -216,5 +227,64 @@ final class HallwayNavigationTests: XCTestCase {
         for i in 0...25 { f.update(position: p(10), heading: 0, time: 3+Double(i)/10, trackingNormal: true) }
         XCTAssertEqual(f.state, .nearRoom)
         f.invalidate(); XCTAssertThrowsError(try f.confirmArrival())
+    }
+}
+
+final class HallwayGPSModeTests: XCTestCase {
+    /// L-shaped hallway: 6 m along +x, then 6 m along +z.
+    private func follower() throws -> HallwayFollower {
+        let pts = (0...12).map { i -> SpatialPoint in i <= 6 ? SpatialPoint(x: Float(i), y: 0, z: 0) : SpatialPoint(x: 6, y: 0, z: Float(i-6)) }
+        let entrance = ScanLandmark(label: "Front door", kind: "entrance", position: pts.first!)
+        let room = ScanLandmark(label: "Room 105", kind: "room", position: pts.last!)
+        let route = HallwayRoute(id: UUID(), scanID: UUID(), entrance: entrance, room: room, path: pts, confirmedAt: Date())
+        var f = HallwayFollower(route: route); f.setLocalized(); return f
+    }
+    private func walk(_ f: inout HallwayFollower, _ p: SpatialPoint, heading: Float = 0, from t: inout Double, frames: Int = 12) {
+        for _ in 0..<frames { f.update(position: p, heading: heading, time: t, trackingNormal: true); t += 0.1 }
+    }
+    func testStartsAnywhereOnPathWithoutEntranceConfirmation() throws {
+        var f = try follower(); var t = 0.0
+        walk(&f, SpatialPoint(x: 3, y: 0, z: 0.4), from: &t)
+        XCTAssertEqual(f.state, .guiding)
+        XCTAssertEqual(f.progress, 3, accuracy: 0.2)
+    }
+    func testPoseCorrectionAndTrackingLossRecoverAutomatically() throws {
+        var f = try follower(); var t = 0.0
+        walk(&f, SpatialPoint(x: 2, y: 0, z: 0), from: &t)
+        XCTAssertEqual(f.state, .guiding)
+        // ARKit snaps 1 m forward when it refines the match.
+        walk(&f, SpatialPoint(x: 3, y: 0, z: 0), from: &t)
+        XCTAssertEqual(f.state, .guiding)
+        // Tracking lost for 3 s, then resumes further along.
+        for _ in 0..<30 { f.update(position: nil, heading: nil, time: t, trackingNormal: false); t += 0.1 }
+        XCTAssertEqual(f.state, .trackingLost)
+        walk(&f, SpatialPoint(x: 6, y: 0, z: 2), heading: .pi/2, from: &t)
+        XCTAssertEqual(f.state, .guiding)
+        XCTAssertEqual(f.progress, 8, accuracy: 0.3)
+    }
+    func testOffPathTellsWhichWayAndResumes() throws {
+        var f = try follower(); var t = 0.0
+        walk(&f, SpatialPoint(x: 2, y: 0, z: 0), from: &t)
+        // Step 3 m to the side, facing +x; the path (z = 0) is then anticlockwise = left.
+        walk(&f, SpatialPoint(x: 2, y: 0, z: 3), heading: 0, from: &t, frames: 15)
+        XCTAssertEqual(f.state, .offRoute)
+        XCTAssertTrue(f.instruction.contains("to your left"), f.instruction)
+        walk(&f, SpatialPoint(x: 2.5, y: 0, z: 0.3), from: &t)
+        XCTAssertEqual(f.state, .guiding)
+    }
+    func testWalkingBackwardsDoesNotStopGuidance() throws {
+        var f = try follower(); var t = 0.0
+        walk(&f, SpatialPoint(x: 4, y: 0, z: 0), from: &t)
+        walk(&f, SpatialPoint(x: 3, y: 0, z: 0), heading: .pi, from: &t, frames: 20)
+        XCTAssertEqual(f.state, .guiding)
+        XCTAssertEqual(f.instruction, "Turn around.")
+        XCTAssertEqual(f.progress, 3, accuracy: 0.2)
+    }
+    func testArrivesAutomatically() throws {
+        var f = try follower(); var t = 0.0
+        walk(&f, SpatialPoint(x: 6, y: 0, z: 4), heading: .pi/2, from: &t)
+        walk(&f, SpatialPoint(x: 6, y: 0, z: 5.6), heading: .pi/2, from: &t, frames: 15)
+        XCTAssertEqual(f.state, .arrived)
+        XCTAssertEqual(LiveGuidance.message(f).cue, .arrived)
     }
 }

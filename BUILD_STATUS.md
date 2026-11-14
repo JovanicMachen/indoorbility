@@ -1,3 +1,9 @@
+# GPS accuracy + saved 3D maps as GPS walkthroughs — 2026-11-14
+
+Outdoor: first route waits for a ≤15 m fix (≤30 m after 10 s); progress never jitters backwards over a turn; leg changes no longer teleport progress onto the corner (dropped the turn cue early); first fix can't snap to a far part of a looping route; off-route needs 6 sustained fixes in a 30 m+ corridor before rerouting. Indoor: once ARKit relocalizes into the saved world map the follower runs in GPS mode — starts anywhere on the path, rides through tracking hiccups and pose snaps, says which side the path is when you stray, says "Turn around", and arrives automatically. Saved destinations have one Start button: >60 m from the recorded entrance pin it walks you there by GPS and hands off to the camera at the door. 156 core tests pass (7 new); unsigned iPhone build passes. Not yet walked on a physical phone.
+
+---
+
 # Live guidance upgrade — 2026-11-14
 
 Added local measured-turn milestones, native voice selection/rate, original cue sounds, independent sound/mute controls, a production-follower simulation, richer live depth diagnostics, and Help keyboard/dock fix. Core: 72 passed; backend offline: 11 passed; UI: 15/16 full run, remaining case passed after fix on focused rerun. Physical accuracy and LiDAR performance remain unverified. See docs/LIVE_GUIDANCE_VALIDATION.md.

@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 import IndoorbilityCore
 
 struct RememberRouteView: View {
@@ -18,6 +19,9 @@ struct RememberRouteView: View {
     @State private var saving = false
     @State private var error: String?
     @State private var entranceFix: EntranceLocation?
+    /// Best GPS fix seen while standing at the start, so the saved 3D map gets a real
+    /// map pin even when GPS is weaker near a building.
+    @State private var bestStartFix: CLLocation?
     @State private var completed: IndoorJourneyTarget?
     @State private var scanning = false
     @State private var diagnostics = false
@@ -165,7 +169,12 @@ struct RememberRouteView: View {
                         Text("Hold still and point at a textured wall until tracking returns.").font(.headline)
                     } else if stage == 1 {
                         Button("Start here") {
-                            camera.mark(entrance); entranceFix = location.entranceFix; location.stop(); stage = 2
+                            camera.mark(entrance)
+                            entranceFix = location.entranceFix ?? bestStartFix.flatMap { fix in
+                                fix.horizontalAccuracy <= 35 && abs(fix.timestamp.timeIntervalSinceNow) < 120
+                                    ? EntranceLocation(latitude: fix.coordinate.latitude, longitude: fix.coordinate.longitude, accuracy: fix.horizontalAccuracy, confirmedAt: Date()) : nil
+                            }
+                            location.stop(); stage = 2
                             settings.speak("Start confirmed. Walk the known hallway to \(room).")
                         }.buttonStyle(.borderedProminent).disabled(camera.meshCount == 0)
                     } else if stage == 2 {
@@ -198,6 +207,10 @@ struct RememberRouteView: View {
             }
         }.overlay { VoiceEdgeGlow(active: confirmationVoice.listening) }.interactiveDismissDisabled(saving)
             .task { location.start(); await camera.start() }
+            .onChange(of: location.location) { _, fix in
+                guard stage == 1, let fix, fix.horizontalAccuracy >= 0 else { return }
+                if bestStartFix.map({ fix.horizontalAccuracy <= $0.horizontalAccuracy || abs($0.timestamp.timeIntervalSinceNow) > 60 }) ?? true { bestStartFix = fix }
+            }
             .alert("Shared landmark", isPresented: $markingLandmark) {
                 TextField("Name on the sign", text: $sharedLandmark)
                 Button("Mark here") { camera.mark(sharedLandmark); sharedLandmark = "" }.disabled(sharedLandmark.trimmingCharacters(in: .whitespaces).isEmpty)

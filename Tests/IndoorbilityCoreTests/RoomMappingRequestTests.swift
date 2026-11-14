@@ -27,6 +27,11 @@ final class RoomMappingRequestTests: XCTestCase {
         XCTAssertEqual(request?.room, "005")
         XCTAssertNil(request?.verifiedFloor)
     }
+    func testCasualWalkingRequest() {
+        XCTAssertEqual(RoomMappingRequest.friend("Walk me to 005 Friend Center")?.room, "005")
+        XCTAssertEqual(RoomMappingRequest.resolve("guide me to room six please", selectedBuilding: "Library")?.room, "6")
+        XCTAssertNil(RoomMappingRequest.friend("Walk me to 005 Friend Circle"))
+    }
     func testSpokenAliasAndDigits() {
         XCTAssertEqual(RoomMappingRequest.friend("frend center zero zero five")?.room, "005")
         XCTAssertEqual(RoomMappingRequest.friend("Friend Center 006")?.verifiedFloor, "LL")

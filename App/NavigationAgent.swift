@@ -142,6 +142,7 @@ private struct AgentResponse: Decodable {
     func agentContext() -> AgentContext
     func executeAgent(_ call: AgentCall) async -> AgentToolResult
     func presentAgentResult(_ result: AgentToolResult)
+    func presentClarification(_ text: String)
     func handleVoice(_ text: String)
 }
 
@@ -231,7 +232,7 @@ private struct AgentResponse: Decodable {
                             // Don't repeat an old observation after the user has moved or tracking changed.
                             if actual.sessionRevision == model.agentContext().sessionRevision, model.voiceResponse != actual.userSafeExplanation { model.presentAgentResult(actual) }
                         } else if results.isEmpty {
-                            model.voiceResponse = final.clarification == "destination" ? "Which mapped room do you mean?" : final.clarification == "store" ? "Choose a specific mapped store first." : VoiceCommandInput.notUnderstood
+                            model.presentClarification(final.clarification == "destination" ? "Which room and building?" : final.clarification == "store" ? "Which store?" : "What would you like help with?")
                         }
                         log("Completed in \(Int(Date().timeIntervalSince(start)*1000)) ms · grounded local response", run: reply.runId)
                         self.busy = false; self.runID = nil; return

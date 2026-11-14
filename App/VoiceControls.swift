@@ -311,10 +311,20 @@ private final class BackSwipeView: UIView, UIGestureRecognizerDelegate {
         }
         return nil
     }
+    private func sharesScreen(_ touched: UIViewController?, with owner: UIViewController) -> Bool {
+        // SwiftUI scroll content may have a child hosting controller. Accept that
+        // subtree, but never a separately presented sheet or keyboard window.
+        var current = touched
+        while let controller = current {
+            if controller === owner { return true }
+            current = controller.parent
+        }
+        return false
+    }
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         guard enabled, !UIAccessibility.isVoiceOverRunning, let window, let touched = touch.view,
               convert(bounds, to: window).contains(touch.location(in: window)),
-              let ownController = owner(of: self), owner(of: touched) === ownController else { return false }
+              let ownController = owner(of: self), sharesScreen(owner(of: touched), with: ownController) else { return false }
         var view: UIView? = touched
         while let current = view {
             if current is UISlider || current is UISwitch || current is SCNView { return false }
