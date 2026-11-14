@@ -33,6 +33,20 @@ final class IndoorbilityUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
     }
 
+    func testCloseSearchClearsQueryAndCanSearchAgain() throws {
+        app.tabBars.buttons["Home"].tap()
+        let field = app.textFields["destinationSearch"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap(); field.typeText("Friend Center 006")
+        app.buttons["closeDestinationSearch"].tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "Search destinations")
+        XCTAssertFalse(app.buttons["closeDestinationSearch"].exists)
+        field.tap(); field.typeText("Friend Center 008")
+        XCTAssertTrue(app.buttons.containing(.staticText, identifier: "Room 008 · Friend Center").firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, "Friend Center 008")
+    }
+
     func testProductionGuidanceSimulationAndMute() throws {
         settingsRoot()
         reveal(app.buttons["AI connection"])
@@ -85,6 +99,12 @@ final class IndoorbilityUITests: XCTestCase {
         XCTAssertTrue(app.buttons["End directions"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.navigationBars["Find building"].exists)
         XCTAssertFalse(app.textFields["Building or address"].exists)
+        // Camera-first presentation with the fixed map available on demand.
+        XCTAssertTrue(app.buttons["Map"].waitForExistence(timeout: 5))
+        app.buttons["Map"].tap()
+        XCTAssertTrue(app.buttons["Camera"].waitForExistence(timeout: 5))
+        app.buttons["Camera"].tap()
+        XCTAssertTrue(app.buttons["Map"].waitForExistence(timeout: 5))
     }
 
     func testKnownRoomOffersPrefilledRecording() throws {

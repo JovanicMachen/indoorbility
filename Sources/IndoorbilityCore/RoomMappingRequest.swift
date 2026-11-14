@@ -12,7 +12,7 @@ public struct RoomMappingRequest: Identifiable, Equatable, Sendable {
     /// Only room language may inherit a selected building; an explicit other place must not.
     public static func roomNumber(_ text: String) -> String? {
         let words = text.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
-        let filler: Set<String> = ["take", "me", "to", "room", "number", "please", "go", "navigate", "find", "the", "actually", "instead"]
+        let filler: Set<String> = ["take", "walk", "guide", "me", "to", "room", "number", "please", "go", "navigate", "find", "the", "actually", "instead"]
         let meaningful = words.filter { !filler.contains($0) }
         guard !meaningful.isEmpty, !meaningful.contains("or") else { return nil }
         let digits = ["zero":"0", "oh":"0", "one":"1", "two":"2", "three":"3", "four":"4", "five":"5", "six":"6", "seven":"7", "eight":"8", "nine":"9"]

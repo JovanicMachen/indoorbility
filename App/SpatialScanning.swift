@@ -21,6 +21,17 @@ import IndoorbilityCore
         } catch { self.error = "Could not read saved scans: \(error.localizedDescription)" }
     }
     func save(_ draft: ScanDraft, map: ARWorldMap, mesh: Data) throws {
+        try Self.persist(draft, map: map, mesh: mesh, root: root)
+        reload()
+    }
+    func saveCapture(_ draft: ScanDraft, map: ARWorldMap, records: [MeshRecord]) async throws {
+        let root = root
+        try await Task.detached(priority: .userInitiated) {
+            try Self.persist(draft, map: map, mesh: JSONEncoder().encode(records), root: root)
+        }.value
+        reload()
+    }
+    nonisolated private static func persist(_ draft: ScanDraft, map: ARWorldMap, mesh: Data, root: URL) throws {
         try draft.validate()
         let staging = root.appending(path: ".\(draft.id.uuidString)")
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
@@ -29,8 +40,7 @@ import IndoorbilityCore
         try NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true)
             .write(to: staging.appending(path: "world.arworldmap"), options: .atomic)
         try mesh.write(to: staging.appending(path: "mesh.json"), options: .atomic)
-        try FileManager.default.moveItem(at: staging, to: directory(draft.id))
-        reload()
+        try FileManager.default.moveItem(at: staging, to: root.appending(path: draft.id.uuidString))
     }
     func delete(_ draft: ScanDraft) throws {
         let source = directory(draft.id)
@@ -522,7 +532,7 @@ struct MeshRecord: Codable, Sendable {
         let draft = ScanDraft(name: name, usesLiDAR: true, hasWorldMap: true, samples: samples, landmarks: landmarks,
                               meshVertexCount: records.reduce(0) { $0 + $1.vertices.count },
                               meshTriangleCount: records.reduce(0) { $0 + $1.triangles.count / 3 })
-        try library.save(draft, map: map, mesh: JSONEncoder().encode(records))
+        try await library.saveCapture(draft, map: map, records: records)
         stop()
         return draft
     }

@@ -57,7 +57,7 @@ public enum LiveGuidance {
                 cue: follower.state == .arrived ? .arrived : [.trackingLost, .offRoute, .blocked].contains(follower.state) ? .attention : nil)
         }
         // Preserve the follower's heading/off-route warning instead of issuing an incompatible turn.
-        if follower.instruction.hasPrefix("Moving away") || follower.instruction.hasPrefix("You may") || follower.instruction.hasPrefix("Check your heading") {
+        if follower.instruction.hasPrefix("Moving away") || follower.instruction.hasPrefix("Turn around") || follower.instruction.hasPrefix("You may") || follower.instruction.hasPrefix("Check your heading") {
             return GuidanceMessage(id: follower.instruction, text: follower.instruction, cue: .attention)
         }
         if follower.instruction.hasPrefix("Stairs") || follower.instruction.hasPrefix("Level change") {
