@@ -300,6 +300,11 @@ final class IndoorbilityUITests: XCTestCase {
         app.buttons["showRoute"].tap()
         openSettingsTool("Manage scans and landmarks")
         capture("05-scan")
+        if !app.buttons["readSign"].exists {
+            reveal(app.buttons["Map tools"])
+            app.buttons["Map tools"].tap()
+        }
+        reveal(app.buttons["readSign"])
         app.buttons["readSign"].tap()
         reveal(app.buttons["sampleSign"])
         app.buttons["sampleSign"].tap()
@@ -317,6 +322,10 @@ final class IndoorbilityUITests: XCTestCase {
         openSettingsTool("Demo navigation")
         XCTAssertTrue(app.staticTexts["Via Lift B"].waitForExistence(timeout: 5))
         openSettingsTool("Manage scans and landmarks")
+        if !app.buttons["newSpatialScan"].exists {
+            reveal(app.buttons["Map tools"])
+            app.buttons["Map tools"].tap()
+        }
         reveal(app.buttons["newSpatialScan"])
         app.buttons["newSpatialScan"].tap()
         XCTAssertTrue(app.staticTexts["LiDAR device required"].waitForExistence(timeout: 5))

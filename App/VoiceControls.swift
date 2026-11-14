@@ -1,4 +1,5 @@
 import SwiftUI
+import SceneKit
 import IndoorbilityCore
 
 // Attach to this view's own window so tab bars, sheets and bottom controls cannot clip the halo.
@@ -316,7 +317,7 @@ private final class BackSwipeView: UIView, UIGestureRecognizerDelegate {
               let ownController = owner(of: self), owner(of: touched) === ownController else { return false }
         var view: UIView? = touched
         while let current = view {
-            if current is UISlider || current is UISwitch { return false }
+            if current is UISlider || current is UISwitch || current is SCNView { return false }
             view = current.superview
         }
         return true

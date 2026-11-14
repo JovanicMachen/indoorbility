@@ -6,7 +6,9 @@ final class NavigationFeedbackTests: XCTestCase {
         queue.push(PendingSpeech("Turn left", priority: .direction, now: 1))
         queue.push(PendingSpeech("Possible drop", priority: .safety, now: 2))
         XCTAssertEqual(queue.next(now: 3)?.text, "Possible drop")
-        XCTAssertEqual(queue.next(now: 4)?.text, "Turn left")
+        XCTAssertNil(queue.next(now: 4)) // Pre-warning directions must be revalidated.
+        queue.push(PendingSpeech("Continue straight", priority: .direction, now: 4))
+        XCTAssertEqual(queue.next(now: 4)?.text, "Continue straight")
         XCTAssertNil(queue.next(now: 5))
     }
     func testInterruptedTurnCannotReplaceNewerTurn() {

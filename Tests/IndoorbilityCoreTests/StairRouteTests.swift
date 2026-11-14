@@ -89,13 +89,13 @@ final class StairRouteTests: XCTestCase {
         XCTAssertNotEqual(follower.state, .nearRoom)
         XCTAssertThrowsError(try follower.confirmArrival())
     }
-    func testOutdoorDoesNotRepeatCompletedTurnAndUsesCourse() {
+    func testOutdoorDoesNotRepeatCompletedTurnWhenCourseChanges() {
         var p = OutdoorProgress(legs: [.init(instruction: "Turn left", points: [.init(0,0), .init(100,0)])])
         for i in 1...3 { p.update(.init(40,0), accuracy: 5, timestamp: Double(i), now: Double(i), course: 90) }
         XCTAssertEqual(p.travelInstruction, "Continue straight")
         p.update(.init(41,0), accuracy: 5, timestamp: 4, now: 4, course: 270)
         XCTAssertEqual(p.travelInstruction, "Continue straight") // A single noisy course does not flip the cue.
         for i in 5...6 { p.update(.init(41,0), accuracy: 5, timestamp: Double(i), now: Double(i), course: 270) }
-        XCTAssertEqual(p.travelInstruction, "Continue along this path")
+        XCTAssertEqual(p.travelInstruction, "Continue straight") // Course cannot replace the planned maneuver.
     }
 }

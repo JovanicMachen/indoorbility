@@ -49,6 +49,7 @@ struct RememberRouteView: View {
     var body: some View {
         Group {
             if let completed {
+                ScrollView {
                 VStack(spacing: 22) {
                     Image(systemName: "point.topleft.down.to.point.bottomright.curvepath")
                         .font(.system(size: 48, weight: .medium)).foregroundStyle(Color.indoorTeal)
@@ -59,6 +60,7 @@ struct RememberRouteView: View {
                     Text("Route recorded").font(.largeTitle.bold())
                     Label("Saved on this iPhone", systemImage: "checkmark").font(.subheadline).foregroundStyle(Color.indoorTeal)
                     Text("\(completed.route.entrance.label) → \(completed.route.room.label)").font(.headline)
+                    SavedScanPreview(file: completed.library.directory(completed.draft.id).appending(path: "mesh.json"))
                     Text("Publish your recording to find it in search.")
                         .multilineTextAlignment(.center).foregroundStyle(.secondary)
                     Button("Done") { if let onFinished { onFinished() } else { dismiss() } }
@@ -66,7 +68,8 @@ struct RememberRouteView: View {
                     NavigationLink("Preview & publish") {
                         VolunteerReviewView(library: library, settings: settings, draft: completed.draft, route: completed.route)
                     }.font(.subheadline)
-                }.padding(28).frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.indoorBackground)
+                }.padding(28).frame(maxWidth: .infinity)
+                }.background(Color.indoorBackground)
             } else if stage == 0 {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 24) {

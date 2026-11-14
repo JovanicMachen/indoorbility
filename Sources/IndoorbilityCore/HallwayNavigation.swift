@@ -103,7 +103,13 @@ public struct HallwayFollower {
     public private(set) var alignment = ScanAlignment.identity
     public private(set) var stable = false
     public let route: HallwayRoute
-    private var headingDecision = SteadyHeading()
+    public let building: Building
+    /// Diagnostic headings in the saved map frame; neither selects a maneuver.
+    public private(set) var cameraHeading: Float?
+    public private(set) var movementHeading: Float?
+    public var selectedSegment: Int { segmentIndex(at: progress) }
+    private var movementAnchor: SpatialPoint?
+    private var retreatSince: TimeInterval?
     private var confirmed = false
     private var stableSince: TimeInterval?
     private var previousTime: TimeInterval?
@@ -131,7 +137,7 @@ public struct HallwayFollower {
         return max(0, low-1)
     }
     public init(route: HallwayRoute) {
-        self.route = route; totalDistance = route.distance; remaining = route.distance
+        self.route = route; building = route.building; totalDistance = route.distance; remaining = route.distance
         includesLevelChange = route.hasLevelChange
         turns = LiveGuidance.measuredTurns(route.path)
         var cumulative: [Float] = [0]
@@ -139,7 +145,7 @@ public struct HallwayFollower {
         distances = cumulative
     }
     public mutating func invalidate(_ message: String = "Position uncertain. Point at a known sign and confirm the landmark.") {
-        headingDecision.reset()
+        cameraHeading = nil; movementHeading = nil; movementAnchor = nil; retreatSince = nil
         confirmed = false; stable = false; stableSince = nil; previousTime = nil; previousPose = nil
         position = nil; offSince = nil; arrivalSince = nil; state = .trackingLost; instruction = message
     }
@@ -153,12 +159,24 @@ public struct HallwayFollower {
         let p = alignment.apply(livePosition)
         let projection = project(p, minimum: 0, maximum: totalDistance)
         guard projection.distance < 1.2 else { throw MapError.invalid("The confirmed landmark is not on this hallway.") }
+        // A crossing or nearby return corridor can fit the same landmark pose.
+        // Reject ambiguous recovery instead of silently choosing the first segment.
+        for i in 0..<(route.path.count-1) {
+            let a = route.path[i], b = route.path[i+1], length = distances[i+1]-distances[i]
+            let t = max(0, min(1, ((p.x-a.x)*(b.x-a.x)+(p.y-a.y)*(b.y-a.y)+(p.z-a.z)*(b.z-a.z))/(length*length)))
+            let along = distances[i]+t*length
+            let q = SpatialPoint(x: a.x+t*(b.x-a.x), y: a.y+t*(b.y-a.y), z: a.z+t*(b.z-a.z))
+            if abs(along-projection.along) > 3 && p.distance(to: q) <= projection.distance+0.25 {
+                throw MapError.invalid("This position matches more than one route segment. Confirm a different landmark away from the junction.")
+            }
+        }
+        movementAnchor = nil; movementHeading = nil; cameraHeading = nil; retreatSince = nil
         self.alignment = alignment; position = p; progress = projection.along; remaining = max(0, totalDistance-progress)
         confirmed = true; state = .guiding; previousPose = nil; previousTime = nil; arrivalSince = nil; offSince = nil
     }
     public mutating func update(position live: SpatialPoint?, heading: Float?, time: TimeInterval, trackingNormal: Bool, routeAvailable: Bool = true) {
         guard routeAvailable else { invalidate("This hallway is reported closed. No alternative has been mapped."); state = .blocked; return }
-        guard trackingNormal, let live, live.isFinite, let heading, heading.isFinite, time.isFinite else { invalidate(); return }
+        guard trackingNormal, let live, live.isFinite, heading.map({ $0.isFinite }) ?? true, time.isFinite else { invalidate(); return }
         if let prior = previousTime, time <= prior || time-prior > 0.8 { invalidate("Tracking was interrupted. Confirm a landmark to continue.") }
         if let prior = previousTime, let pose = previousPose, live.distance(to: pose) > max(0.6, Float(time-prior)*2.5) {
             invalidate("Position jumped. Confirm a landmark to continue."); return
@@ -168,6 +186,10 @@ public struct HallwayFollower {
         stable = time - (stableSince ?? time) >= 2
         guard stable else { position = nil; instruction = "Finding your position. Point at a known sign."; return }
         let p = alignment.apply(live); position = p
+        cameraHeading = heading.map(alignment.heading)
+        if let anchor = movementAnchor, p.horizontalDistance(to: anchor) >= 0.3 {
+            movementHeading = atan2(p.z-anchor.z, p.x-anchor.x); movementAnchor = p
+        } else if movementAnchor == nil { movementAnchor = p }
         guard confirmed else { if state != .offRoute { state = .ready }; instruction = "Confirm the marked entrance, or recover at a known landmark."; return }
         if state == .arrived { return }
         let projection = project(p, minimum: max(0, progress-1.5), maximum: min(totalDistance, progress+2.5))
@@ -180,6 +202,15 @@ public struct HallwayFollower {
             return
         }
         offSince = nil
+        // Sustained measured retreat is not a phone rotation. Require recovery instead
+        // of advancing into a nearby return corridor or guessing which way to face.
+        if projection.along < progress-0.8 {
+            if retreatSince == nil { retreatSince = time }
+            instruction = "Moving away from the destination. Pause and check the map."
+            if time-(retreatSince ?? time) >= 1 { invalidate(instruction) }
+            return
+        }
+        retreatSince = nil
         progress = max(progress, projection.along); remaining = max(0, totalDistance-progress)
         if remaining < 1 && p.distance(to: route.room.position) <= 0.8 {
             if arrivalSince == nil { arrivalSince = time }
@@ -195,17 +226,8 @@ public struct HallwayFollower {
             instruction = target.y > p.y ? "Stairs up ahead. Use the handrail." : "Stairs down ahead. Use the handrail."
             return
         }
-        let bearing = atan2(target.z-p.z, target.x-p.x)
-        let delta = atan2(sin(bearing-alignment.heading(heading)), cos(bearing-alignment.heading(heading)))
-        let direction: String
-        switch headingDecision.update(radians: Double(delta), time: time) {
-        case .straight: direction = "Continue straight"
-        case .left: direction = "Bear left"
-        case .right: direction = "Bear right"
-        case .reverse: direction = "Turn around"
-        case nil: direction = "Check your heading"
-        }
-        instruction = "\(direction) toward \(route.room.label)."
+        instruction = "Continue straight."
+
     }
     public mutating func confirmArrival() throws {
         guard state == .nearRoom, stable, let p = position, p.distance(to: route.room.position) <= 0.8 else {

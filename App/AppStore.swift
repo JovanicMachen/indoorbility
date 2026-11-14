@@ -19,6 +19,13 @@ final class AppStore: ObservableObject {
     private var travelTime = 0.0
     private var travelContext = ""
     private var lastPriorityCue = 0.0
+    func updateJourneySound(active: Bool) {
+        audio.setJourneyLoop(active: active && !allSoundMuted && !speechSuspended && !speaker.isSpeaking &&
+            !UIAccessibility.isVoiceOverRunning && UIApplication.shared.applicationState == .active &&
+            ProcessInfo.processInfo.systemUptime-lastPriorityCue >= 4 &&
+            (UserDefaults.standard.object(forKey: "travelFeedback") as? Bool ?? true) &&
+            (UserDefaults.standard.object(forKey: "guidanceCues") as? Bool ?? true))
+    }
     func travelFeedback(position: SIMD2<Double>?, context: String) {
         let now = ProcessInfo.processInfo.systemUptime
         guard let position, !speechSuspended, UIApplication.shared.applicationState == .active,
@@ -34,7 +41,7 @@ final class AppStore: ObservableObject {
         guard !speaker.isSpeaking, !UIAccessibility.isVoiceOverRunning, now-lastPriorityCue >= 4 else { return }
         travelPosition = position; travelTime = now
         if preferences.haptics { UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.3) }
-        if !allSoundMuted, UserDefaults.standard.object(forKey: "guidanceCues") as? Bool ?? true { audio.travelTick() }
+        if context != "outdoor", !allSoundMuted, UserDefaults.standard.object(forKey: "guidanceCues") as? Bool ?? true { audio.travelTick() }
     }
     func directionalCue(_ target: SIMD3<Float>?) {
         guard let target, !allSoundMuted, !speechSuspended, UserDefaults.standard.bool(forKey: "directionalSound"), UIApplication.shared.applicationState == .active else { beacon.stop(); return }
@@ -118,13 +125,13 @@ final class AppStore: ObservableObject {
         if session.needsPosition { return "Scan a room or entrance sign, or choose a starting point. Then choose Where to. This is a demo map; your position is not tracked along the route." }
         return session.route == nil ? "Choose a destination to plan your route." : "Your route is ready. Select Start for checkpoint instructions."
     }
-    func speak(_ text: String, force: Bool = false, priority: SpeechImportance = .routine) {
+    func speak(_ text: String, force: Bool = false, priority: SpeechImportance = .routine, positionTime: Double? = nil) {
         guard GuidanceSoundPolicy.speechAllowed(muted: allSoundMuted, enabled: preferences.speech, forced: force, voiceOver: UIAccessibility.isVoiceOverRunning, active: UIApplication.shared.applicationState == .active, suspended: speechSuspended) else { return }
         audio.stop()
         lastPriorityCue = ProcessInfo.processInfo.systemUptime
         lastNarration = text
         activeSpeechGeneration += 1
-        speaker.speak(text, priority: priority)
+        speaker.speak(text, priority: priority, positionTime: positionTime)
     }
     func repeatInstruction() { speak(instruction) }
     func repeatNarration() { speak(lastNarration.isEmpty ? navigationSummary : lastNarration) }

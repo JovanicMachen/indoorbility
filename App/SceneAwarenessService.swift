@@ -73,7 +73,7 @@ struct SensorDiagnosticsView: View {
          "Frame intervals over 50 ms: \(camera.frameGaps) (not a dropped-frame count)",
          "Stale pose / depth results rejected: \(camera.stalePoseFrames) / \(camera.lateDepthFrames)",
          camera.depth.timestamp > 0 ? String(format: "Depth age: %.3f s", ProcessInfo.processInfo.systemUptime-camera.depth.timestamp) : "Depth age: unavailable",
-         "Rolling timing window: up to 300 samples; physical accuracy not measured here."]
+         "Rolling timing window: up to 300 samples; physical accuracy not measured here."] + NavigationPerformance.shared.lines
     }
     var body: some View {
         NavigationStack {

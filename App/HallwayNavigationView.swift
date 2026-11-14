@@ -43,13 +43,13 @@ import IndoorbilityCore
     private var delivery = GuidanceDelivery()
     var guidance: GuidanceMessage { LiveGuidance.message(follower, feet: UserDefaults.standard.bool(forKey: "guidanceFeet")) }
     func deliverGuidance() {
-        guard !camera.floorHazard, camera.postureIssue == nil, ProcessInfo.processInfo.systemUptime >= surfaceWarningUntil else { return }
+        guard !camera.floorHazard, ProcessInfo.processInfo.systemUptime >= surfaceWarningUntil else { return }
         let value = guidance
-        guard delivery.consume(value, listening: listeningForCommand || agent.busy, now: ProcessInfo.processInfo.systemUptime, repeatReliable: running && fresh && follower.stable && !needsAlignment && follower.state == .guiding) else { return }
+        guard delivery.consume(value, listening: listeningForCommand, now: ProcessInfo.processInfo.systemUptime, repeatReliable: running && fresh && follower.stable && !needsAlignment && follower.state == .guiding) else { return }
         if value.cue == .turn {
             deliveredTurnTime = ProcessInfo.processInfo.systemUptime; deliveredTurnProgress = follower.progress
         }
-        settings.speak(value.text, priority: value.cue == .attention ? .safety : .direction)
+        settings.speak(value.text, priority: value.cue == .attention ? .safety : .direction, positionTime: lastPoseWall > 0 ? lastPoseWall : nil)
         settings.cue(value.cue ?? .approach, instruction: value.text)
     }
     private var epoch = UUID()
@@ -78,6 +78,9 @@ import IndoorbilityCore
     private(set) var deliveredTurnProgress: Float?
     var diagnosticLines: [String] {
         ["Map confidence: " + mapConfidence.rawValue,
+         "Selected segment: \(follower.selectedSegment); next maneuver: \(follower.nextMeasuredTurn?.direction ?? "destination")",
+         "Camera heading (map radians): \(follower.cameraHeading.map(String.init(describing:)) ?? "unavailable")",
+         "Measured movement (map radians): \(follower.movementHeading.map(String.init(describing:)) ?? "unavailable")",
          "Measured surface comparison: " + geometryEvidence,
          String(format: "World map load: %.1f ms", worldMapLoadMS),
          "Recovery confirmations / successes / rejected: \(recoveryAttempts) / \(recoverySuccesses) / \(recoveryFailures)",
@@ -137,7 +140,7 @@ import IndoorbilityCore
             sourceAvailable = library.sourceRoutesAvailable(reviewedRoute)
             sourceCheckTime = now
         }
-        return sourceAvailable && (try? Router.plan(in: route.building, from: "entrance", to: "room", avoidStairs: settings.preferences.avoidStairs, excluding: routeStore.blockedEdges)) != nil
+        return sourceAvailable && (try? Router.plan(in: follower.building, from: "entrance", to: "room", avoidStairs: settings.preferences.avoidStairs, excluding: routeStore.blockedEdges)) != nil
     }
     init(route: HallwayRoute, draft: ScanDraft, library: ScanLibrary, settings: AppStore) throws {
         try route.validate(for: draft)
@@ -256,7 +259,10 @@ import IndoorbilityCore
     }
     private func receive(_ p: SpatialPoint?, heading: Float?, time: TimeInterval, normal: Bool) {
         guard running else { return }
-        if normal && time-lastUpdate < 0.05 { return }
+        if normal && time >= lastUpdate && time-lastUpdate < 0.05 { return }
+        let began = ProcessInfo.processInfo.systemUptime
+        defer { NavigationPerformance.shared.record("Indoor follower + guidance processing ms", (ProcessInfo.processInfo.systemUptime-began)*1000) }
+        NavigationPerformance.shared.position("AR", captured: time)
         lastUpdate = time
         let now = ProcessInfo.processInfo.systemUptime
         guard time.isFinite, now >= time, now-time < 0.5 else {
@@ -270,12 +276,13 @@ import IndoorbilityCore
         if needsAlignment, usingSavedMap, camera.savedMapRelocalized, mapConfidence == .unverified {
             needsAlignment = false; mapConfidence = .savedMap
         }
+        let routeAvailable = available
         let previousState = follower.state
-        follower.update(position: p, heading: heading, time: time, trackingNormal: normal, routeAvailable: available)
+        follower.update(position: p, heading: heading, time: time, trackingNormal: normal, routeAvailable: routeAvailable)
         if previousState != follower.state && [.trackingLost, .offRoute, .blocked, .arrived].contains(follower.state) { settings.stopSpeech() }
-        camera.showRoute(route.path, alignment: follower.alignment, verified: !camera.floorHazard && camera.postureIssue == nil && normal && !needsAlignment && follower.stable && [.guiding, .nearRoom].contains(follower.state))
+        camera.showRoute(route.path, alignment: follower.alignment, verified: !camera.floorHazard && camera.postureIssue == nil && heading != nil && normal && !needsAlignment && follower.stable && [.guiding, .nearRoom].contains(follower.state))
         if [.trackingLost, .offRoute].contains(follower.state) && previousState != follower.state { losePosition(); handoff.resetEvidence(); entranceRecognition.reset(); roomRecognition.reset(); recoveryFirst = nil; firstObservation = nil }
-        if automaticStartAllowed, available, follower.state == .ready {
+        if automaticStartAllowed, routeAvailable, follower.state == .ready {
             let near = follower.position.map { $0.horizontalDistance(to: route.entrance.position) <= 1 && abs($0.y-route.entrance.position.y) < 0.6 } ?? false
             let state = handoff.update(distanceToBuilding: nil, horizontalAccuracy: nil, mapMatches: usingSavedMap && camera.savedMapRelocalized && !needsAlignment,
                 entranceLabelMatches: entranceRecognition.matchedRecently, positionNearEntrance: near,
@@ -287,7 +294,7 @@ import IndoorbilityCore
             }
         }
         if ArrivalEvidence.canConfirm(state: follower.state, trackingStable: follower.stable, poseFresh: fresh,
-                                      labelMatches: roomRecognition.matchedRecently, routeAvailable: available) {
+                                      labelMatches: roomRecognition.matchedRecently, routeAvailable: routeAvailable) {
             confirmArrival()
         }
         if !camera.floorHazard && fresh && follower.stable && follower.state == .guiding && !needsAlignment && !listeningForCommand && !agent.busy && time >= surfaceWarningUntil {
@@ -342,7 +349,7 @@ import IndoorbilityCore
                 return
             }
             if command.contains("repeat") {
-                voiceResponse = follower.instruction
+                voiceResponse = guidance.text
             } else if command.contains("where am i") {
                 voiceResponse = fresh && follower.stable && [.guiding, .nearRoom].contains(follower.state)
                     ? "On the mapped hallway in \(draft.name). \(Int(follower.remaining.rounded())) metres remain to \(route.room.label)."
@@ -529,7 +536,7 @@ private struct HallwayGuidanceView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @StateObject private var voice = VoiceCommandInput()
-    @State private var map = false
+    @State private var map = true
     @State private var recovery = false
     @State private var report = false
     @State private var mark: UUID?
@@ -539,13 +546,19 @@ private struct HallwayGuidanceView: View {
     @AppStorage("guidanceMuted") private var muted = false
     @AppStorage("agentDeveloperMode") private var developerMode = false
     var body: some View {
+        let _ = NavigationPerformance.shared.bodyEvaluated("Indoor navigation")
         ZStack {
             Color.black.ignoresSafeArea()
             SpatialCamera(session: model.camera).ignoresSafeArea().accessibilityHidden(true)
             if map {
                 Color.indoorBackground.ignoresSafeArea()
                 TraceView(samples: model.route.path.map { ScanSample(position: $0, segment: 0) },
-                          landmarks: [model.route.entrance, model.route.room], position: model.follower.position).padding()
+                          landmarks: [model.route.entrance, model.route.room], position: model.needsAlignment ? nil : model.follower.position,
+                          nextTurn: model.follower.nextMeasuredTurn.map { model.route.path[$0.index] },
+                          cameraHeading: developerMode ? model.follower.cameraHeading : nil,
+                          movementHeading: developerMode ? model.follower.movementHeading : nil,
+                          selectedSegment: developerMode ? model.follower.selectedSegment : nil).padding()
+
             }
             VStack {
                 HStack(spacing: 10) {
@@ -565,7 +578,12 @@ private struct HallwayGuidanceView: View {
                         navigationOptions
                     }.padding(14).background(Color.indoorCard.opacity(0.96), in: RoundedRectangle(cornerRadius: 28))
                 }.foregroundStyle(Color.indoorInk).padding(.horizontal, 16)
-                DirectionBadge(instruction: model.guidance.text, reliable: guidanceActive)
+                if map { Text("Fixed map orientation").font(.caption).padding(6).background(.regularMaterial, in: Capsule()) }
+                if !map { DirectionBadge(instruction: model.guidance.text, reliable: guidanceActive) }
+                if developerMode {
+                    Text("Segment \(model.follower.selectedSegment) · Next: \(model.follower.nextMeasuredTurn?.direction ?? "destination")\nOrange: camera · Blue: movement · Green: selected segment")
+                        .font(.caption2).padding(8).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                }
                 Spacer()
                 ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -671,7 +689,7 @@ private struct HallwayGuidanceView: View {
                     }, onUnrecognized: model.speechNotUnderstood, haptics: model.settings.preferences.haptics, result: { text in model.listeningForCommand = false; model.submitVoice(text) })
     }
     private var guidanceActive: Bool {
-        !model.camera.floorHazard && model.camera.postureIssue == nil && model.running && model.follower.stable && !model.needsAlignment && [.guiding, .nearRoom].contains(model.follower.state)
+        !model.camera.floorHazard && model.running && model.follower.stable && !model.needsAlignment && [.guiding, .nearRoom].contains(model.follower.state)
     }
     private func roundControl(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -767,7 +785,7 @@ extension HallwayNavigationModel: NavigationAgentHost {
         return AgentContext(sessionId: ledger.sessionId, sessionRevision: ledger.revision,
             buildingId: draft.id.uuidString, floor: nil, tracking: tracking,
             destinationId: route.room.id.uuidString, avoidStairs: settings.preferences.avoidStairs,
-            instruction: verified ? follower.instruction : "Position uncertain. Confirm a known landmark before guidance.",
+            instruction: verified ? guidance.text : "Position uncertain. Confirm a known landmark before guidance.",
             knownDestinations: draft.landmarks.prefix(100).map { ["id": $0.id.uuidString, "name": $0.label, "mapId": draft.id.uuidString, "floorLabel": floorLabel ?? "unknown"] },
             knownClosures: routeStore.blockedEdges.sorted())
     }

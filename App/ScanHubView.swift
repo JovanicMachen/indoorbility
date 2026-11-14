@@ -98,7 +98,10 @@ struct ScanDetailView: View {
                         }.buttonStyle(ForestButtonStyle())
                     }
                 } else { SmallTag(text: "Saved scan", symbol: "square.3.layers.3d") }
-                TraceView(samples: draft.samples, landmarks: draft.landmarks)
+                SavedScanPreview(file: library.directory(draft.id).appending(path: "mesh.json"))
+                DisclosureGroup("Recorded path") {
+                    TraceView(samples: draft.samples, landmarks: draft.landmarks)
+                }
                 if library.requiresVolunteerReview(draft.id), let route = try? library.hallway(draft) {
                     NavigationLink("Preview & publish") { VolunteerReviewView(library: library, settings: settings, draft: draft, route: route) }
                 }
@@ -115,7 +118,7 @@ struct ScanDetailView: View {
                 NavigationLink { SpatialCaptureView(library: library, draft: draft) } label: { Label("Locate me in this space", systemImage: "location.fill").padding(18).frame(maxWidth: .infinity) }
                 Button("Delete saved scan", role: .destructive) { confirmDelete = true }.frame(minHeight: 44)
                 if let error { Text(error).foregroundStyle(.red) }
-                Text("The trace records where the camera travelled. It does not establish corridor widths, safe clearance or accessible routes.").font(.footnote).foregroundStyle(.secondary)
+                Text("Captured surfaces and route. Unscanned areas stay unknown.").font(.footnote).foregroundStyle(.secondary)
             }.padding(20)
         }.background(Color.indoorBackground).swipeLeftToGoBack().navigationTitle("Saved space").navigationBarTitleDisplayMode(.inline)
             .confirmationDialog("Delete this scan and its spatial map?", isPresented: $confirmDelete, titleVisibility: .visible) {

@@ -52,6 +52,51 @@ final class HallwayNavigationTests: XCTestCase {
         XCTAssertThrowsError(try LiveHallwayCommand.destination(in: "Room 999", landmarks: [room]))
         XCTAssertThrowsError(try LiveHallwayCommand.destination(in: "Room 105", landmarks: [room, room]))
     }
+    func testBackwardWalkingPausesWithoutInventingTurns() throws {
+        var f = try ready()
+        for i in 1...40 { f.update(position: p(Float(i)/10), heading: 0, time: 2.5+Double(i)/10, trackingNormal: true) }
+        var texts = [String]()
+        for i in 1...25 {
+            f.update(position: p(4-Float(i)/10), heading: 0, time: 6.5+Double(i)/10, trackingNormal: true)
+            texts.append(LiveGuidance.message(f).text)
+        }
+        XCTAssertEqual(f.state, .trackingLost)
+        XCTAssertTrue(texts.contains(where: { $0.hasPrefix("Moving away") }))
+        XCTAssertFalse(texts.contains(where: { $0.contains("left") || $0.contains("right") }))
+        XCTAssertLessThanOrEqual(f.progress, 4.01)
+    }
+    func testVerticalCameraDoesNotInvalidateReliablePosition() throws {
+        var f = try ready()
+        for i in 1...10 { f.update(position: p(Float(i)/10), heading: nil, time: 2.5+Double(i)/10, trackingNormal: true) }
+        XCTAssertEqual(f.state, .guiding)
+        XCTAssertNil(f.cameraHeading)
+        XCTAssertEqual(f.progress, 1, accuracy: 0.01)
+        f.update(position: p(1), heading: nil, time: 3.6, trackingNormal: false)
+        XCTAssertEqual(f.state, .trackingLost)
+    }
+    func testCrossingRouteKeepsSequenceAndRejectsAmbiguousRecovery() throws {
+        let path = (-5...5).map { p(Float($0)) }
+            + (1...5).map { p(5, Float($0)) }
+            + (1...5).map { p(5-Float($0), 5) }
+            + (1...10).map { p(0, 5-Float($0)) }
+        let marks = [ScanLandmark(label: "Entrance", kind: "entrance", position: path[0]), ScanLandmark(label: "Destination", kind: "room", position: path.last!)]
+        let d = ScanDraft(name: "Synthetic crossing", usesLiDAR: true, hasWorldMap: true, samples: path.map { ScanSample(position: $0, segment: 0) }, landmarks: marks, meshVertexCount: 30, meshTriangleCount: 10)
+        let route = try HallwayRoute.make(draft: d, entranceID: marks[0].id, roomID: marks[1].id, reviewed: true)
+        var follower = HallwayFollower(route: route)
+        for i in 0...25 { follower.update(position: path[0], heading: 0, time: Double(i)/10, trackingNormal: true) }
+        try follower.confirmEntrance()
+        XCTAssertThrowsError(try follower.recover(using: .identity, livePosition: p(0, 0)))
+        XCTAssertEqual(follower.progress, 0)
+        XCTAssertEqual(follower.route.id, route.id)
+        for i in 1..<path.count {
+            follower.update(position: path[i], heading: i % 2 == 0 ? .pi : -.pi/2, time: 2.5+Double(i)*0.5, trackingNormal: true)
+            XCTAssertEqual(follower.progress, Float(i), accuracy: 0.01)
+            XCTAssertEqual(follower.state, .guiding)
+        }
+        follower.invalidate()
+        XCTAssertEqual(follower.route, route)
+        XCTAssertEqual(follower.route.room.id, marks[1].id)
+    }
     func testMeasuredGraphAndClosure() throws {
         let r = try route()
         XCTAssertEqual(r.distance, 10, accuracy: 0.001)
@@ -140,10 +185,10 @@ final class HallwayNavigationTests: XCTestCase {
         f.update(position: p(0), heading: 0, time: 4, trackingNormal: true)
         XCTAssertFalse(f.stable); XCTAssertThrowsError(try f.confirmEntrance())
     }
-    func testHeadingChangesInstructionWithoutSkippingProgress() throws {
+    func testHeadingDoesNotChangePlannedInstructionOrProgress() throws {
         var f = try ready()
         for i in 26...30 { f.update(position: p(0), heading: .pi, time: Double(i)/10, trackingNormal: true) }
-        XCTAssertTrue(f.instruction.hasPrefix("Turn around"))
+        XCTAssertTrue(f.instruction.hasPrefix("Continue straight"))
         XCTAssertEqual(f.progress, 0)
         for i in 31...35 { f.update(position: p(0), heading: 0, time: Double(i)/10, trackingNormal: true) }
         XCTAssertTrue(f.instruction.hasPrefix("Continue straight"))

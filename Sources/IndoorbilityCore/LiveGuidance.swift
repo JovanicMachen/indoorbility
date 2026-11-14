@@ -42,7 +42,7 @@ public enum LiveGuidance {
             // Compare metre-scale headings. A rounded corner need not contain any
             // single sample with a 45-degree kink; that requirement missed real turns.
             guard abs(delta) > .pi/4 else { continue }
-            let turn = MeasuredTurn(index: i, along: along, direction: delta < 0 ? "left" : "right")
+            let turn = MeasuredTurn(index: i, along: along, direction: abs(delta) >= .pi*5/6 ? "around" : delta < 0 ? "left" : "right")
             if let last = bend.last, turn.direction != last.turn.direction || along-last.turn.along > 2 {
                 finishBend()
             }
@@ -57,7 +57,7 @@ public enum LiveGuidance {
                 cue: follower.state == .arrived ? .arrived : [.trackingLost, .offRoute, .blocked].contains(follower.state) ? .attention : nil)
         }
         // Preserve the follower's heading/off-route warning instead of issuing an incompatible turn.
-        if follower.instruction.hasPrefix("Turn around") || follower.instruction.hasPrefix("You may") || follower.instruction.hasPrefix("Check your heading") {
+        if follower.instruction.hasPrefix("Moving away") || follower.instruction.hasPrefix("You may") || follower.instruction.hasPrefix("Check your heading") {
             return GuidanceMessage(id: follower.instruction, text: follower.instruction, cue: .attention)
         }
         if follower.instruction.hasPrefix("Stairs") || follower.instruction.hasPrefix("Level change") {
@@ -68,9 +68,6 @@ public enum LiveGuidance {
             let remaining = max(0, turn.along-follower.progress)
             let key = "\(follower.route.room.id)-\(turn.index)"
             if remaining <= 1.5 { return GuidanceMessage(id: key+"-now", text: "Turn \(leftRight) now.", cue: .turn) }
-            if remaining > 3 && follower.instruction.hasPrefix("Bear") {
-                return GuidanceMessage(id: follower.instruction, text: follower.instruction, cue: .approach)
-            }
             if remaining <= 20 {
                 let band = remaining <= 5 ? 5 : remaining <= 10 ? 10 : 20
                 return GuidanceMessage(id: key+"-approach-\(band)", text: "Continue straight. In \(distance(remaining, feet: feet)), turn \(leftRight).", cue: .approach,
@@ -78,10 +75,7 @@ public enum LiveGuidance {
             }
             return GuidanceMessage(id: key+"-straight", text: "Continue straight for \(distance(remaining, feet: feet)).", cue: .started, primary: "Continue straight", secondary: "Next turn in " + distance(remaining, feet: feet))
         }
-        if follower.instruction.hasPrefix("Bear") {
-            return GuidanceMessage(id: follower.instruction, text: follower.instruction, cue: .approach)
-        }
-        return GuidanceMessage(id: "\(follower.route.room.id)-final", text: "Continue along the mapped hallway for \(distance(follower.remaining, feet: feet)) toward \(follower.route.room.label).", cue: nil)
+        return GuidanceMessage(id: "\(follower.route.room.id)-final", text: "Continue straight. \(distance(follower.remaining, feet: feet)) to \(follower.route.room.label).", cue: nil, primary: "Continue straight", secondary: distance(follower.remaining, feet: feet) + " remaining")
     }
 }
 

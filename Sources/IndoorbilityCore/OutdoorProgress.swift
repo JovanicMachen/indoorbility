@@ -39,8 +39,10 @@ public struct OutdoorProgress {
     }
     public var instruction: String { legs.indices.contains(index) ? legs[index].instruction : "Route unavailable" }
     public var travelInstruction: String {
-        if !alignedWithPath && travelledOnLeg < 12 { return instruction }
-        return alignedWithPath ? "Continue straight" : "Continue along this path"
+        // MapKit's maneuver belongs to the start of this leg. GPS course is
+        // diagnostic orientation evidence, not permission to repeat an old turn.
+        if travelledOnLeg <= 3 { return instruction }
+        return "Continue straight"
     }
     public func upcomingDetail(feet: Bool = false) -> String {
         let metres = Float((remaining / 5).rounded() * 5)

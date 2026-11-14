@@ -220,14 +220,20 @@ struct MeshRecord: Codable, Sendable {
         let displayUpdate = frame.timestamp-lastDisplayTime >= 0.1
         if displayUpdate {
             frameInterval = lastFrameTime > 0 ? frame.timestamp-lastFrameTime : 0
-            trackingDetail = String(describing: frame.camera.trackingState)
-            mappingDetail = String(describing: frame.worldMappingStatus)
+            let tracking = String(describing: frame.camera.trackingState)
+            let mapping = String(describing: frame.worldMappingStatus)
+            if trackingDetail != tracking { trackingDetail = tracking }
+            if mappingDetail != mapping { mappingDetail = mapping }
             lastDisplayTime = frame.timestamp
         }
         lastFrameTime = frame.timestamp
-        consumeDepth(frame)
-        consumeObjects(frame)
-        consumeSafety(frame)
+        // Position delivery has priority; perception work is bounded and dispatched
+        // only after the navigation callback, including tracking-loss delivery.
+        defer {
+            consumeDepth(frame)
+            consumeObjects(frame)
+            consumeSafety(frame)
+        }
         guard case .normal = frame.camera.trackingState else {
             if case .limited(.relocalizing) = frame.camera.trackingState { sawRelocalizing = true }
             if trackingWasNormal { trackingInterruptions += 1 }
@@ -240,7 +246,6 @@ struct MeshRecord: Codable, Sendable {
         }
         trackingWasNormal = true
         if hasInitialMap && sawRelocalizing { savedMapRelocalized = true }
-        onFrame?(frame)
         let t = frame.camera.transform.columns.3
         let p = SpatialPoint(x: t.x, y: t.y, z: t.z)
         lastValidPoseTime = frame.timestamp
@@ -248,6 +253,7 @@ struct MeshRecord: Codable, Sendable {
         let forward = frame.camera.transform.columns.2
         let heading: Float? = hypot(forward.x, forward.z) > 0.2 ? atan2(-forward.z, -forward.x) : nil
         onPose?(p, heading, frame.timestamp, true)
+        onFrame?(frame)
         if displayUpdate { status = locating ? "Camera tracking active · verify map alignment" : "Tracking · \(meshes.count) mesh sections" }
         if !locating, frame.timestamp - lastTime > 0.1,
            samples.last?.segment != segment || (samples.last?.position.distance(to: p) ?? 1) > 0.15 {
@@ -532,9 +538,14 @@ struct TraceView: View {
     let samples: [ScanSample]
     let landmarks: [ScanLandmark]
     var position: SpatialPoint?
+    var nextTurn: SpatialPoint? = nil
+    var cameraHeading: Float? = nil
+    var movementHeading: Float? = nil
+    var selectedSegment: Int? = nil
     var body: some View {
         Canvas { context, size in
-            let points = samples.map(\.position) + landmarks.map(\.position) + (position.map { [$0] } ?? [])
+            // Fixed route bounds: drifting/live positions never recenter or rotate the map.
+            let points = samples.map(\.position) + landmarks.map(\.position)
             let minX = points.map(\.x).min() ?? 0, maxX = points.map(\.x).max() ?? 1
             let minZ = points.map(\.z).min() ?? 0, maxZ = points.map(\.z).max() ?? 1
             let scale = min((size.width - 40) / CGFloat(max(maxX-minX, 2)), (size.height - 40) / CGFloat(max(maxZ-minZ, 2)))
@@ -545,6 +556,25 @@ struct TraceView: View {
                 else { path.addLine(to: point(sample.position)) }
             }
             context.stroke(path, with: .color(.indoorTeal.opacity(0.5)), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+            if let index = selectedSegment, samples.indices.contains(index), samples.indices.contains(index+1) {
+                var selected = Path(); selected.move(to: point(samples[index].position)); selected.addLine(to: point(samples[index+1].position))
+                context.stroke(selected, with: .color(.green), lineWidth: 8)
+            }
+            if let nextTurn {
+                let p = point(nextTurn)
+                context.stroke(Path(ellipseIn: CGRect(x: p.x-10, y: p.y-10, width: 20, height: 20)), with: .color(.indoorTeal), lineWidth: 3)
+                context.draw(Text("Next turn").font(.caption2), at: CGPoint(x: p.x, y: p.y-20))
+            }
+            if let position {
+                for (heading, color) in [(cameraHeading, Color.orange), (movementHeading, Color.blue)] {
+                    if let heading {
+                        let p = point(position)
+                        var direction = Path(); direction.move(to: p)
+                        direction.addLine(to: CGPoint(x: p.x+CGFloat(cos(heading))*28, y: p.y+CGFloat(sin(heading))*28))
+                        context.stroke(direction, with: .color(color), lineWidth: 3)
+                    }
+                }
+            }
             for mark in landmarks { let p = point(mark.position); context.fill(Path(ellipseIn: CGRect(x:p.x-5,y:p.y-5,width:10,height:10)), with: .color(.orange)); context.draw(Text(mark.label).font(.caption2), at: CGPoint(x:p.x,y:p.y+15)) }
             if let position { let p = point(position); context.fill(Path(ellipseIn: CGRect(x:p.x-8,y:p.y-8,width:16,height:16)), with: .color(.indoorTeal)) }
         }.frame(height: 210).background(Color.indoorBackground, in: RoundedRectangle(cornerRadius: 18))

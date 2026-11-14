@@ -21,6 +21,27 @@ final class NavigationReliabilityTests: XCTestCase {
         XCTAssertEqual(follower.state, .guiding)
         XCTAssertEqual(follower.progress, 14, accuracy: 0.05)
     }
+    func testRouteAvailabilityConstructionBenchmark() throws {
+        let points = (0..<5000).map { SpatialPoint(x: Float($0)*0.2, y: 0, z: 0) }
+        let marks = [ScanLandmark(label: "Start", kind: "entrance", position: points[0]), ScanLandmark(label: "End", kind: "room", position: points.last!)]
+        let draft = ScanDraft(name: "Synthetic only", usesLiDAR: true, hasWorldMap: true, samples: points.map { .init(position: $0, segment: 0) }, landmarks: marks, meshVertexCount: 30, meshTriangleCount: 10)
+        let route = try HallwayRoute.make(draft: draft, entranceID: marks[0].id, roomID: marks[1].id, reviewed: true)
+        var successful = 0
+        var start = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<1000 {
+            if try Router.plan(in: route.building, from: "entrance", to: "room") != nil { successful += 1 }
+        }
+        let originalMS = (ProcessInfo.processInfo.systemUptime-start)*1000
+        let building = HallwayFollower(route: route).building
+        start = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<1000 {
+            if try Router.plan(in: building, from: "entrance", to: "room") != nil { successful += 1 }
+        }
+        let cachedMS = (ProcessInfo.processInfo.systemUptime-start)*1000
+        print(String(format: "AVAILABILITY_BENCH 5000 vertices / 1000 checks: rebuilding %.3f ms; immutable graph %.3f ms", originalMS, cachedMS))
+        XCTAssertEqual(successful, 2000)
+        XCTAssertNil(try Router.plan(in: building, from: "entrance", to: "room", excluding: ["hallway"]))
+    }
     func testLostPoseCannotResumeOrArriveWithoutConfirmation() throws {
         let fixture = HallwayNavigationTests()
         var follower = try fixture.ready()

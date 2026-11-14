@@ -1,6 +1,15 @@
 import XCTest
 @testable import IndoorbilityCore
 final class OutdoorProgressTests: XCTestCase {
+    func testCourseFluctuationsDoNotRepeatCompletedTurn() {
+        var p = OutdoorProgress(legs: [.init(instruction: "Turn left", points: [.init(0,0), .init(100,0)])])
+        for i in 1...30 {
+            p.update(.init(8,0), accuracy: 5, timestamp: Double(i), now: Double(i), course: i % 2 == 0 ? 90 : 270)
+            if i >= 3 { XCTAssertEqual(p.travelInstruction, "Continue straight") }
+        }
+        XCTAssertFalse(p.wrongWay)
+        XCTAssertEqual(p.index, 0)
+    }
     func testProgressAndNextLegRequireRepeatedFixes() {
         var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)]), .init(instruction: "Turn left", points: [.init(100,0), .init(100,100)])])
         for i in 1...3 { p.update(.init(40,0), accuracy: 5, timestamp: Double(i), now: Double(i)) }

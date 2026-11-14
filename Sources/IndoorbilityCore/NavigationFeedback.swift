@@ -8,18 +8,25 @@ public struct PendingSpeech: Equatable, Sendable {
     public let text: String
     public let priority: SpeechImportance
     public let expires: Double
-    public init(_ text: String, priority: SpeechImportance, now: Double) {
-        self.text = text; self.priority = priority
+    public let requestedAt: Double
+    public let positionTime: Double?
+    public init(_ text: String, priority: SpeechImportance, now: Double, positionTime: Double? = nil) {
+        self.text = text; self.priority = priority; self.requestedAt = now; self.positionTime = positionTime
         expires = now + (priority == .safety ? 6 : 10)
     }
 }
 public struct NavigationSpeechQueue {
     private var lines: [PendingSpeech] = []
     public init() {}
+    public static func shouldInterrupt(active: PendingSpeech, incoming: PendingSpeech) -> Bool {
+        incoming.text != active.text &&
+            ((incoming.priority == .safety && active.priority != .safety) ||
+             (incoming.priority == .direction && active.priority != .safety))
+    }
     public mutating func clear() { lines = [] }
     public mutating func push(_ line: PendingSpeech) {
         lines.removeAll { $0.text == line.text }
-        if line.priority == .direction { lines.removeAll { $0.priority == .direction } }
+        if line.priority == .direction || line.priority == .safety { lines.removeAll { $0.priority == .direction } }
         let index = lines.firstIndex { $0.priority < line.priority } ?? lines.endIndex
         lines.insert(line, at: index)
         if lines.count > 3 { lines.removeLast() }

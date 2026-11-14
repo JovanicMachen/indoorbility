@@ -19,11 +19,12 @@ import IndoorbilityCore
     }
     @objc private func interrupted() { stop() }
     func stop() { queue.clear(); current = nil; utterance = nil; synth.stopSpeaking(at: .immediate) }
-    func speak(_ text: String, priority: SpeechImportance = .routine) {
-        let line = PendingSpeech(text, priority: priority, now: ProcessInfo.processInfo.systemUptime)
+    func speak(_ text: String, priority: SpeechImportance = .routine, positionTime: Double? = nil) {
+        let line = PendingSpeech(text, priority: priority, now: ProcessInfo.processInfo.systemUptime, positionTime: positionTime)
         if current?.text == text { return }
-        if priority == .safety, let active = current, active.priority != .safety {
-            queue.resumeInterrupted(active); current = nil; utterance = nil; synth.stopSpeaking(at: .immediate)
+        if let active = current, NavigationSpeechQueue.shouldInterrupt(active: active, incoming: line) {
+            // An obsolete direction must not finish (or resume after a warning).
+            current = nil; utterance = nil; synth.stopSpeaking(at: .immediate)
         }
         queue.push(line); advance()
     }
@@ -50,6 +51,16 @@ import IndoorbilityCore
               current?.text == text else { return }
         current = nil; advance()
     }
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        let started = ProcessInfo.processInfo.systemUptime
+        Task { @MainActor in
+            guard self.utterance === utterance, let line = self.current else { return }
+            NavigationPerformance.shared.record("Speech request → synthesis start ms", (started-line.requestedAt)*1000)
+            if let source = line.positionTime {
+                NavigationPerformance.shared.record("Position capture → synthesis start ms", (started-source)*1000)
+            }
+        }
+    }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor in
             guard self.utterance === utterance else { return }
@@ -65,8 +76,37 @@ import IndoorbilityCore
 }
 
 /// User-supplied travel tick plus synthesized directional cues.
-@MainActor final class NavigationAudioCoordinator {
+@MainActor final class NavigationAudioCoordinator: NSObject {
     private var player: AVAudioPlayer?
+    private var journeyPlayer: AVAudioPlayer?
+    private var interrupted = false
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(audioInterrupted(_:)), name: AVAudioSession.interruptionNotification, object: nil)
+    }
+    @objc private func audioInterrupted(_ notification: Notification) {
+        guard let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: value) else { return }
+        interrupted = type == .began
+        if interrupted { stop() }
+    }
+    func setJourneyLoop(active: Bool) {
+        guard active, !interrupted else { journeyPlayer?.pause(); return }
+        guard journeyPlayer?.isPlaying != true else { return }
+        do {
+            if journeyPlayer == nil {
+                guard let url = Bundle.main.url(forResource: "JourneyLoop", withExtension: "mp3") else { return }
+                journeyPlayer = try AVAudioPlayer(contentsOf: url)
+                journeyPlayer?.numberOfLoops = -1
+                journeyPlayer?.prepareToPlay()
+            }
+            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .mixWithOthers, .allowBluetooth])
+            try AVAudioSession.sharedInstance().setActive(true)
+            journeyPlayer?.volume = 0
+            journeyPlayer?.play()
+            journeyPlayer?.setVolume(0.08, fadeDuration: 0.4)
+        } catch { lastCue = "Playback unavailable" }
+    }
     private(set) var lastCue = "None"
     func travelTick() {
         guard player?.isPlaying != true,
@@ -80,7 +120,7 @@ import IndoorbilityCore
             player?.play()
         } catch { lastCue = "Playback unavailable" }
     }
-    func stop() { player?.stop() }
+    func stop() { player?.stop(); journeyPlayer?.stop() }
     func play(_ cue: GuidanceCue) {
         stop()
         let frequencies: [Double]
@@ -185,5 +225,61 @@ struct NavigationSoundSettings: View {
             for i in 0..<6615 { buffer.floatChannelData![0][i] = Float(sin(Double(i) * 2 * .pi * 600 / 44100) * sin(.pi * Double(i)/6615) * 0.15) }
             node.stop(); node.scheduleBuffer(buffer); node.play()
         } catch { stop() }
+    }
+}
+
+/// Opt-in, bounded timing only. No coordinates, speech text, or credentials leave the phone.
+@MainActor final class NavigationPerformance: NSObject {
+    static let shared = NavigationPerformance()
+    private var windows: [String: TimingWindow] = [:]
+    private var bodyCounts: [String: Int] = [:]
+    private var pendingDisplay: [String: Double] = [:]
+    private var displayLink: CADisplayLink?
+    private var previousDisplay: Double?
+    private var lastActivity = 0.0
+    private(set) var updates = 0
+    var enabled: Bool { UserDefaults.standard.bool(forKey: "agentDeveloperMode") }
+    func bodyEvaluated(_ screen: String) {
+        guard enabled else { return }
+        bodyCounts[screen, default: 0] += 1
+    }
+    func record(_ name: String, _ value: Double) {
+        guard enabled else { return }
+        windows[name, default: TimingWindow()].record(value)
+    }
+    func position(_ source: String, captured: Double) {
+        guard enabled else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now >= captured else { return }
+        updates += 1; lastActivity = now
+        // Preserve oldest outstanding sample so coalescing does not hide a stall.
+        if pendingDisplay[source] == nil { pendingDisplay[source] = captured }
+        if displayLink == nil {
+            let link = CADisplayLink(target: self, selector: #selector(displayTick))
+            link.add(to: .main, forMode: .common); displayLink = link
+        }
+    }
+    @objc private func displayTick(_ link: CADisplayLink) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard enabled, UIApplication.shared.applicationState == .active, now-lastActivity < 2 else {
+            displayLink?.invalidate(); displayLink = nil; previousDisplay = nil; pendingDisplay = [:]; return
+        }
+        if let previousDisplay {
+            record("Main display callback interval ms", (now-previousDisplay)*1000)
+        }
+        previousDisplay = now
+        for (source, captured) in pendingDisplay {
+            record(source + " capture → next display opportunity ms", (now-captured)*1000)
+        }
+        pendingDisplay = [:]
+    }
+    var lines: [String] {
+        guard enabled else { return ["Enable developer diagnostics to measure navigation timing."] }
+        return ["Position updates observed: \(updates)",
+                "Display opportunity is a scheduling proxy, not measured pixels or map-tile rendering.",
+                "Synthesis start excludes VoiceOver and does not measure acoustic output."] + bodyCounts.keys.sorted().map { "\($0) body evaluations: \(bodyCounts[$0]!)" } + windows.keys.sorted().map { key in
+            let window = windows[key]!
+            return String(format: "%@: mean %.2f, p95 %.2f (n=%d)", key, window.mean ?? 0, window.p95 ?? 0, window.count)
+        }
     }
 }

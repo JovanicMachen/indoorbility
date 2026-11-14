@@ -29,6 +29,12 @@ import IndoorbilityCore
         guard requested, let value = locations.last, value.horizontalAccuracy >= 0,
               abs(value.timestamp.timeIntervalSinceNow) < 10 else { return }
         guard location.map({ value.timestamp > $0.timestamp }) ?? true else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        let metrics = NavigationPerformance.shared
+        if let previous = location { metrics.record("GPS capture interval ms", value.timestamp.timeIntervalSince(previous.timestamp)*1000) }
+        metrics.record("GPS reported horizontal uncertainty m", value.horizontalAccuracy)
+        metrics.record("GPS capture → callback ms", max(0, -value.timestamp.timeIntervalSinceNow)*1000)
+        metrics.position("GPS", captured: now + value.timestamp.timeIntervalSinceNow)
         location = value; message = "Location updated"
     }
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
@@ -86,7 +92,7 @@ struct OutdoorRouteView: View {
     var initialRoom: String? = nil
     @StateObject private var location = OutdoorLocation()
     @StateObject private var camera = SpatialSession()
-    @State private var showingMap = false
+    @State private var showingMap = true
     @State private var mapPosition: MapCameraPosition = .automatic
     @State private var trail = OutdoorTrace()
     @State private var trailOrigin: MKMapPoint?
@@ -127,6 +133,7 @@ struct OutdoorRouteView: View {
     @State private var started = false
     @Environment(\.scenePhase) private var phase
     var body: some View {
+        let _ = NavigationPerformance.shared.bodyEvaluated("Outdoor navigation")
         ZStack {
             if automaticallyStart && !showingMap {
                 SpatialCamera(session: camera).ignoresSafeArea().accessibilityHidden(true)
@@ -213,6 +220,9 @@ struct OutdoorRouteView: View {
                         }
                     }
                 }
+                if UserDefaults.standard.bool(forKey: "agentDeveloperMode") {
+                    ShareLink("Export timing", item: NavigationPerformance.shared.lines.joined(separator: "\n"))
+                }
                 if !started {
                     Button(settings.preferences.avoidStairs ? "Locate the destination" : indoor == nil ? "Show walking route" : "Begin journey") { started = true; location.start() }
                         .buttonStyle(.borderedProminent).frame(minHeight: 44)
@@ -254,6 +264,9 @@ struct OutdoorRouteView: View {
                     walking?.pause(); settings.stopSpeech(); speakWalking()
                 }
                 if phase == .active, !presented, roomRequest == nil, roomTarget == nil { speakWalking() }
+                settings.updateJourneySound(active: started && !arrived && !insideBuilding && !presented &&
+                    roomRequest == nil && roomTarget == nil && !roomVoice.busy &&
+                    phase == .active && now >= awarenessUntil)
             }
             .onChange(of: location.location) { _, fix in
                 guard let fix, started else { return }
@@ -302,12 +315,16 @@ struct OutdoorRouteView: View {
                     announceAwareness("Possible surface ahead, about " + LiveGuidance.distance(distance, feet: feet) + ". Pause and check your surroundings.")
                 }
                 if let initialRoom, roomQuery.isEmpty { roomQuery = initialRoom }; if automaticallyStart { started = true; location.start() } }
-            .onDisappear { camera.stop(); location.stop(); directions?.cancel(); directions = nil }
-            .onChange(of: phase) { _, value in if value != .active { trail.interrupt(); walking?.pause(); settings.stopSpeech(); camera.stop(); location.stop(); directions?.cancel(); directions = nil; started = false } else if automaticallyStart && !arrived && !presented && roomRequest == nil && roomTarget == nil { started = true; location.start(); if !showingMap { Task { await camera.start(navigation: true) } } } }
+            .onDisappear { settings.updateJourneySound(active: false); camera.stop(); location.stop(); directions?.cancel(); directions = nil }
+            .onChange(of: phase) { _, value in if value != .active { settings.updateJourneySound(active: false); trail.interrupt(); walking?.pause(); settings.stopSpeech(); camera.stop(); location.stop(); directions?.cancel(); directions = nil; started = false } else if automaticallyStart && !arrived && !presented && roomRequest == nil && roomTarget == nil { started = true; location.start(); if !showingMap { Task { await camera.start(navigation: true) } } } }
     }
     private var outdoorMap: some View {
-        Map(position: $mapPosition) {
-            UserAnnotation()
+        Map(position: $mapPosition, interactionModes: [.pan, .zoom]) {
+            if let fix = location.location, abs(fix.timestamp.timeIntervalSinceNow) < 10 {
+                Annotation("You", coordinate: fix.coordinate) {
+                    Circle().fill(.blue).frame(width: 16, height: 16).overlay(Circle().stroke(.white, lineWidth: 3))
+                }
+            }
             Marker(destination.name ?? "Destination", coordinate: destination.placemark.coordinate)
             if let route { MapPolyline(route.polyline).stroke(Color.indoorTeal, lineWidth: 6) }
             if let origin = trailOrigin {
@@ -373,7 +390,7 @@ struct OutdoorRouteView: View {
                     Button("Find a new route") { settings.stopSpeech(); Task { await calculate() } }.buttonStyle(.borderedProminent)
                 case .nearDestination:
                     Text("Near your destination—check the entrance.").font(.headline)
-                    Button("I’m here") { arrived = true; self.walking = nil; camera.stop(); location.stop(); settings.stopSpeech(); settings.speak("You’ve arrived at " + (destination.name ?? "your destination")); settings.cue(.arrived) }.buttonStyle(.borderedProminent)
+                    Button("I’m here") { settings.updateJourneySound(active: false); arrived = true; self.walking = nil; camera.stop(); location.stop(); settings.stopSpeech(); settings.speak("You’ve arrived at " + (destination.name ?? "your destination")); settings.cue(.arrived) }.buttonStyle(.borderedProminent)
                 case .guiding:
                     Label(walking.wrongWay ? "You may be going the wrong way. Turn around when safe." : walking.travelInstruction.isEmpty ? "Continue along the mapped path" : walking.travelInstruction, systemImage: walking.wrongWay ? "arrow.uturn.backward" : walkingSymbol(walking.travelInstruction))
                         .font(.title3.bold()).accessibilityIdentifier("outdoorLiveInstruction")
@@ -441,6 +458,9 @@ struct OutdoorRouteView: View {
         if let fix = location.location { updateWalking(fix) }
     }
     private func updateWalking(_ fix: CLLocation) {
+        let began = ProcessInfo.processInfo.systemUptime
+        NavigationPerformance.shared.record("GPS capture → SwiftUI update ms", max(0, -fix.timestamp.timeIntervalSinceNow)*1000)
+        defer { NavigationPerformance.shared.record("Outdoor progress processing ms", (ProcessInfo.processInfo.systemUptime-began)*1000) }
         guard let origin = walkingOrigin, walking != nil else { return }
         let p = MKMapPoint(fix.coordinate)
         walking?.update(.init((p.x-origin.x)*walkingScale, (p.y-origin.y)*walkingScale), accuracy: fix.horizontalAccuracy, timestamp: fix.timestamp.timeIntervalSince1970, now: Date().timeIntervalSince1970, course: fix.speed >= 0.7 && fix.courseAccuracy >= 0 && fix.courseAccuracy <= 25 ? fix.course : nil)
@@ -470,12 +490,12 @@ struct OutdoorRouteView: View {
         case .nearDestination: text = "Near your destination. Check the entrance."
         case .guiding: text = walking.wrongWay ? "You may be going the wrong way. Turn around when safe." : (walking.travelInstruction.isEmpty ? "Follow the mapped path." : walking.travelInstruction) + ". " + walking.upcomingDetail(feet: true) + "."
         }
-        let key = "\(walking.index)-\(walking.status)-\(walking.wrongWay)-\(walking.travelledOnLeg >= 12)-\(walking.alignedWithPath)-\(walking.announcementBand)"
+        let key = "\(walking.index)-\(walking.status)-\(walking.wrongWay)-\(walking.travelledOnLeg > 3)-\(walking.announcementBand)"
         let reminder = walking.status == .guiding && Date().timeIntervalSince(lastWalkingAnnouncement) >= 12
-        if force || (spokenWalking != key && (walking.status != .guiding || walking.wrongWay || Date().timeIntervalSince(lastWalkingAnnouncement) >= 3)) || reminder {
-            let newLeg = !spokenWalking.isEmpty && !spokenWalking.hasPrefix("\(walking.index)-")
+        let newLeg = !spokenWalking.isEmpty && !spokenWalking.hasPrefix("\(walking.index)-")
+        if force || (spokenWalking != key && (newLeg || walking.status != .guiding || walking.wrongWay || Date().timeIntervalSince(lastWalkingAnnouncement) >= 3)) || reminder {
             spokenWalking = key; lastWalkingAnnouncement = Date()
-            settings.speak(text, priority: walking.status == .guiding ? .direction : .safety)
+            settings.speak(text, priority: walking.status == .guiding ? .direction : .safety, positionTime: lastWalkingFix.map { ProcessInfo.processInfo.systemUptime + $0.timeIntervalSinceNow })
             settings.cue(walking.status == .guiding && !walking.wrongWay ? (newLeg ? .turn : .approach) : .attention, instruction: text)
         }
     }
