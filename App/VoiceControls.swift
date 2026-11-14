@@ -86,6 +86,7 @@ struct HoldToTalk: View {
     var onUnrecognized: () -> Void = {}
     var haptics = false
     var diameter: CGFloat = 90
+    var compact = false
     var result: (String) -> Void
     @AppStorage("tapToTalk") private var tapMode = false
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
@@ -116,7 +117,7 @@ struct HoldToTalk: View {
                 .accessibilityLabel(voice.listening ? "Finish speaking" : "Speak to Indoorbility")
                 .accessibilityIdentifier("holdToTalk")
             Text(voice.listening ? "Listening…" : voice.busy ? "Understanding…" : tapping ? "Tap to speak" : "Hold to speak")
-                .font(.callout.weight(.medium))
+                .font(compact ? .caption : .callout.weight(.medium))
         }
         .onChange(of: voice.status) { _, status in
             if status == VoiceCommandInput.notUnderstood { onUnrecognized() }
@@ -242,6 +243,64 @@ struct NavigationAccessibilitySheet: View {
 }
 
 /// A screen-fixed instruction, never a claim of world-space alignment.
+/// Shared camera layout for outdoor GPS and saved indoor routes.
+struct CameraGuidancePanel<Content: View>: View {
+    var maxHeight: CGFloat = 300
+    @ViewBuilder var content: Content
+    var body: some View {
+        ScrollView {
+            content.frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .background(Color.indoorPeach.opacity(0.16), in: RoundedRectangle(cornerRadius: 18))
+                .padding(12)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxHeight: maxHeight)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28))
+        .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+    }
+}
+
+struct CameraGuidanceActions<Microphone: View>: View {
+    var showingMap: Bool
+    var repeatGuidance: () -> Void
+    var toggleMap: () -> Void
+    @ViewBuilder var microphone: Microphone
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Button("Repeat guidance", action: repeatGuidance)
+                .font(.subheadline).frame(minHeight: 44)
+                .accessibilityIdentifier("repeatCameraGuidance")
+            Spacer(minLength: 0)
+            microphone
+            Button(action: toggleMap) {
+                Label(showingMap ? "Camera" : "Map", systemImage: showingMap ? "camera" : "map")
+                    .labelStyle(.iconOnly).font(.title3).frame(width: 44, height: 44)
+                    .background(.regularMaterial, in: Circle())
+            }.buttonStyle(.plain).accessibilityLabel(showingMap ? "Camera" : "Map")
+                .accessibilityIdentifier("toggleNavigationMap")
+        }.foregroundStyle(Color.indoorTeal)
+    }
+}
+
+struct CameraReadSignButton: View {
+    var busy = false
+    var action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if busy { ProgressView() }
+                else { Image(systemName: "text.viewfinder").font(.title2) }
+            }.frame(width: 48, height: 48)
+                .background(.regularMaterial, in: Circle())
+                .overlay(Circle().strokeBorder(.white.opacity(0.6)))
+        }.buttonStyle(.plain).foregroundStyle(Color.indoorInk)
+            .accessibilityLabel("Read a sign").accessibilityIdentifier("readNavigationSign")
+            .disabled(busy)
+    }
+}
+
 struct DirectionBadge: View {
     let instruction: String
     let reliable: Bool
@@ -252,12 +311,7 @@ struct DirectionBadge: View {
         return proximity == .closer ? .red : proximity == .farther ? .blue : .clear
     }
     private var symbol: String {
-        guard reliable else { return "pause.fill" }
-        let text = instruction.lowercased()
-        if text.contains("turn around") || text.contains("u-turn") { return "arrow.uturn.down" }
-        if text.contains("left") { return "arrow.turn.up.left" }
-        if text.contains("right") { return "arrow.turn.up.right" }
-        return "arrow.up"
+        LiveGuidance.symbol(for: instruction, reliable: reliable)
     }
     var body: some View {
         VStack(spacing: 8) {
@@ -312,19 +366,20 @@ private final class BackSwipeView: UIView, UIGestureRecognizerDelegate {
         return nil
     }
     private func sharesScreen(_ touched: UIViewController?, with owner: UIViewController) -> Bool {
-        // SwiftUI scroll content may have a child hosting controller. Accept that
-        // subtree, but never a separately presented sheet or keyboard window.
-        var current = touched
-        while let controller = current {
-            if controller === owner { return true }
-            current = controller.parent
-        }
-        return false
+        // Result cards and scroll content can be sibling hosting controllers.
+        // Compare their containment roots, while presented sheets keep a separate
+        // root and must handle their own back gesture.
+        guard var touchedRoot = touched else { return false }
+        while let parent = touchedRoot.parent { touchedRoot = parent }
+        var ownerRoot = owner
+        while let parent = ownerRoot.parent { ownerRoot = parent }
+        return touchedRoot === ownerRoot
     }
+
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-        guard enabled, !UIAccessibility.isVoiceOverRunning, let window, let touched = touch.view,
-              convert(bounds, to: window).contains(touch.location(in: window)),
-              let ownController = owner(of: self), sharesScreen(owner(of: touched), with: ownController) else { return false }
+        guard enabled, !UIAccessibility.isVoiceOverRunning, window != nil, let touched = touch.view,
+              let ownController = owner(of: self),
+              sharesScreen(owner(of: touched), with: ownController) else { return false }
         var view: UIView? = touched
         while let current = view {
             if current is UISlider || current is UISwitch || current is SCNView { return false }
@@ -333,7 +388,12 @@ private final class BackSwipeView: UIView, UIGestureRecognizerDelegate {
         return true
     }
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        other.view is UIScrollView
+        other is UIPanGestureRecognizer || other.view is UIScrollView
+    }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+        // A result's tap must wait until the horizontal back pan has failed.
+        // Vertical scroll pans still begin normally when our direction check fails.
+        !(other is UIPanGestureRecognizer)
     }
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         let velocity = pan.velocity(in: window)
@@ -349,9 +409,10 @@ struct SwipeLeftBackModifier: ViewModifier {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.isPresented) private var isPresented
     @State private var active = true
+    var enabled = true
     var action: (() -> Void)?
     func body(content: Content) -> some View {
-        content.background(PageBackSwipe(enabled: active && (action != nil || isPresented)) {
+        content.background(PageBackSwipe(enabled: enabled && active && (action != nil || isPresented)) {
             if let action { action() } else { dismiss() }
         })
         .onAppear { active = true }
@@ -359,7 +420,7 @@ struct SwipeLeftBackModifier: ViewModifier {
     }
 }
 extension View {
-    func swipeLeftToGoBack(action: (() -> Void)? = nil) -> some View {
-        modifier(SwipeLeftBackModifier(action: action))
+    func swipeLeftToGoBack(enabled: Bool = true, action: (() -> Void)? = nil) -> some View {
+        modifier(SwipeLeftBackModifier(enabled: enabled, action: action))
     }
 }

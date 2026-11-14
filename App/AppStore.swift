@@ -19,12 +19,16 @@ final class AppStore: ObservableObject {
     private var travelTime = 0.0
     private var travelContext = ""
     private var lastPriorityCue = 0.0
+    private var journeySoundActive = false
     func updateJourneySound(active: Bool) {
-        audio.setJourneyLoop(active: active && !allSoundMuted && !speechSuspended && !speaker.isSpeaking &&
-            !UIAccessibility.isVoiceOverRunning && UIApplication.shared.applicationState == .active &&
-            ProcessInfo.processInfo.systemUptime-lastPriorityCue >= 4 &&
-            (UserDefaults.standard.object(forKey: "travelFeedback") as? Bool ?? true) &&
-            (UserDefaults.standard.object(forKey: "guidanceCues") as? Bool ?? true))
+        journeySoundActive = active
+        refreshJourneySound()
+    }
+    private func refreshJourneySound() {
+        let allowed = GuidanceSoundPolicy.journeyLoopAllowed(travelling: journeySoundActive,
+            muted: allSoundMuted, enabled: UserDefaults.standard.object(forKey: "travelFeedback") as? Bool ?? true,
+            suspended: speechSuspended, active: UIApplication.shared.applicationState == .active)
+        audio.setJourneyLoop(active: allowed, ducked: speaker.isSpeaking || UIAccessibility.isVoiceOverRunning)
     }
     func travelFeedback(position: SIMD2<Double>?, context: String) {
         let now = ProcessInfo.processInfo.systemUptime
@@ -41,14 +45,14 @@ final class AppStore: ObservableObject {
         guard !speaker.isSpeaking, !UIAccessibility.isVoiceOverRunning, now-lastPriorityCue >= 4 else { return }
         travelPosition = position; travelTime = now
         if preferences.haptics { UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.3) }
-        if context != "outdoor", !allSoundMuted, UserDefaults.standard.object(forKey: "guidanceCues") as? Bool ?? true { audio.travelTick() }
+        // The supplied clip loops throughout travel; this cadence supplies only taps.
     }
     func directionalCue(_ target: SIMD3<Float>?) {
         guard let target, !allSoundMuted, !speechSuspended, UserDefaults.standard.bool(forKey: "directionalSound"), UIApplication.shared.applicationState == .active else { beacon.stop(); return }
         beacon.ping(target)
     }
     @Published var allSoundMuted = UserDefaults.standard.bool(forKey: "guidanceMuted") {
-        didSet { UserDefaults.standard.set(allSoundMuted, forKey: "guidanceMuted"); if allSoundMuted { stopSpeech() } }
+        didSet { UserDefaults.standard.set(allSoundMuted, forKey: "guidanceMuted"); if allSoundMuted { stopSpeech() }; refreshJourneySound() }
     }
     func cue(_ cue: GuidanceCue, instruction: String = "") {
         lastPriorityCue = ProcessInfo.processInfo.systemUptime
@@ -64,6 +68,7 @@ final class AppStore: ObservableObject {
         let storage = try stateURL.map { FileStatePersistence(url: $0) } ?? Self.storage()
         persistence = storage
         session = try NavigationSession(building: building, saved: storage.load(for: building))
+        speaker.onSpeakingChanged = { [weak self] in self?.refreshJourneySound() }
     }
 
     private static func storage() throws -> FileStatePersistence {
@@ -127,7 +132,7 @@ final class AppStore: ObservableObject {
     }
     func speak(_ text: String, force: Bool = false, priority: SpeechImportance = .routine, positionTime: Double? = nil) {
         guard GuidanceSoundPolicy.speechAllowed(muted: allSoundMuted, enabled: preferences.speech, forced: force, voiceOver: UIAccessibility.isVoiceOverRunning, active: UIApplication.shared.applicationState == .active, suspended: speechSuspended) else { return }
-        audio.stop()
+        audio.stopCue()
         lastPriorityCue = ProcessInfo.processInfo.systemUptime
         lastNarration = text
         activeSpeechGeneration += 1
@@ -135,5 +140,5 @@ final class AppStore: ObservableObject {
     }
     func repeatInstruction() { speak(instruction) }
     func repeatNarration() { speak(lastNarration.isEmpty ? navigationSummary : lastNarration) }
-    func stopSpeech() { travelPosition = nil; activeSpeechGeneration += 1; speaker.stop(); audio.stop(); beacon.stop() }
+    func stopSpeech() { journeySoundActive = false; travelPosition = nil; activeSpeechGeneration += 1; speaker.stop(); audio.stop(); beacon.stop() }
 }

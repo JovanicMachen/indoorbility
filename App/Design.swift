@@ -6,6 +6,11 @@ extension Color {
     static let indoorBackground = Color(uiColor: UIColor { traits in traits.userInterfaceStyle == .dark ? UIColor(red: 0.09, green: 0.07, blue: 0.09, alpha: 1) : UIColor(red: 1, green: 0.973, blue: 0.953, alpha: 1) })
     static let indoorCard = Color(uiColor: .secondarySystemGroupedBackground)
     static let indoorInk = Color.primary
+    static let indoorCameraCaption = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.79, green: 0.77, blue: 0.78, alpha: 1)
+            : UIColor(red: 0.33, green: 0.30, blue: 0.32, alpha: 1)
+    })
     static let indoorLime = Color.white
     static let indoorForest = indoorTeal
 
@@ -207,5 +212,56 @@ struct DestinationBackdrop: View {
             .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
             .padding(.horizontal, 12).padding(.top, 8)
         }.allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
+/// Lightweight, decorative Home-only snowfall. No interaction or navigation work.
+struct HomeHolidayBackdrop: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var phase
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 15, paused: reduceMotion || phase != .active)) { timeline in
+            Canvas { context, size in
+                let time = reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate
+                // Fixed seeds keep the flakes stable across ordinary UI updates.
+                for index in 0..<36 {
+                    let seed = Double(index)
+                    let column = (seed * 0.61803398875).truncatingRemainder(dividingBy: 1)
+                    let period = 15 + Double(index % 7) * 2
+                    let progress = (time / period + seed * 0.137).truncatingRemainder(dividingBy: 1)
+                    let x = column * size.width + sin(time * 0.35 + seed) * 9
+                    let y = progress * (size.height + 24) - 12
+                    let radius = 1.5 + Double(index % 3) * 0.65
+                    let flake = Path(ellipseIn: CGRect(x: x, y: y, width: radius * 2, height: radius * 2))
+                    context.fill(flake, with: .color(.white.opacity(0.75)))
+                    context.stroke(flake, with: .color(Color.indoorTeal.opacity(0.13)), lineWidth: 0.6)
+                }
+                // Quiet Christmas decals stay at the edges, behind the controls.
+                let trees: [CGPoint] = [CGPoint(x: 30, y: size.height * 0.36),
+                                        CGPoint(x: size.width - 28, y: size.height * 0.74)]
+                for point in trees {
+                    var pine = Path()
+                    for tier in 0..<3 {
+                        let top = point.y - 23 + CGFloat(tier) * 10
+                        let halfWidth = CGFloat(9 + tier * 5)
+                        pine.move(to: CGPoint(x: point.x, y: top))
+                        pine.addLine(to: CGPoint(x: point.x + halfWidth, y: top + 20))
+                        pine.addLine(to: CGPoint(x: point.x - halfWidth, y: top + 20))
+                        pine.closeSubpath()
+                    }
+                    pine.addRect(CGRect(x: point.x - 2.5, y: point.y + 17, width: 5, height: 8))
+                    context.fill(pine, with: .color(Color(red: 0.24, green: 0.39, blue: 0.30).opacity(0.12)))
+                    context.draw(Text(Image(systemName: "star.fill")).font(.system(size: 8))
+                        .foregroundColor(Color(red: 0.68, green: 0.47, blue: 0.23).opacity(0.24)),
+                                 at: CGPoint(x: point.x, y: point.y - 26))
+                }
+                let stars: [CGPoint] = [CGPoint(x: 45, y: 45), CGPoint(x: size.width - 42, y: 80),
+                                        CGPoint(x: size.width - 30, y: size.height * 0.48)]
+                for point in stars {
+                    context.draw(Text(Image(systemName: "sparkle")).font(.system(size: 20))
+                        .foregroundColor(Color(red: 0.68, green: 0.47, blue: 0.23).opacity(0.22)), at: point)
+                }
+            }
+        }.allowsHitTesting(false).accessibilityHidden(true).clipped()
     }
 }

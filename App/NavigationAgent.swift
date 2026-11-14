@@ -57,6 +57,7 @@ private struct AgentResponse: Decodable {
         let expiresAt: Double
         let deviceId: String
         var baseURL: String?
+        var pendingRefreshRequestID: String? = nil
     }
     static let service = "com.indoorbility.agent-access"
     private static var credentialVersion = UUID()
@@ -79,13 +80,22 @@ private struct AgentResponse: Decodable {
     }
     static func accessToken() async throws -> String {
         if let token = token() { return token }
-        guard let base = url, let value = stored() else { throw MapError.invalid("Pair this phone in AI connection.") }
+        guard let base = url, var value = stored() else { throw MapError.invalid("Cloud AI is not connected on this phone.") }
         if let renewal, renewal.base == base.absoluteString { return try await renewal.task.value }
         let renewalID = UUID()
         let version = credentialVersion
+        // Persist before sending: after a timeout, crash or reboot the exact
+        // same rotation request can recover the server's committed response.
+        if value.pendingRefreshRequestID == nil {
+            value.pendingRefreshRequestID = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+                + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            try saveData(JSONEncoder().encode(value))
+        }
+        let saved = value
         let task = Task<String, Error> {
-            var result = try await exchange(base: base, path: "auth/refresh", credential: value.refreshToken)
+            var result = try await exchange(base: base, path: "auth/refresh", credential: saved.refreshToken, requestID: saved.pendingRefreshRequestID)
             guard url == base, credentialVersion == version else { throw CancellationError() }
+            guard result.deviceId == saved.deviceId else { throw MapError.invalid("Cloud device identity changed.") }
             result.baseURL = base.absoluteString
             try saveData(JSONEncoder().encode(result))
             return result.accessToken
@@ -101,18 +111,20 @@ private struct AgentResponse: Decodable {
         result.baseURL = base.absoluteString
         try saveData(JSONEncoder().encode(result))
     }
-    private static func exchange(base: URL, path: String, credential: String) async throws -> Credentials {
+    private static func exchange(base: URL, path: String, credential: String, requestID: String? = nil) async throws -> Credentials {
         var request = URLRequest(url: base.appending(path: path))
         request.httpMethod = "POST"; request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(["credential": credential])
+        var body = ["credential": credential]
+        if let requestID { body["requestId"] = requestID }
+        request.httpBody = try JSONEncoder().encode(body)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForResource = 20
         let session = URLSession(configuration: configuration, delegate: NoAgentRedirect(), delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count < 8192 else {
-            throw MapError.invalid("Cloud access unavailable. Check your connection or pair this phone again.")
+            throw MapError.invalid("Cloud AI is unavailable. Check your connection and try again.")
         }
         return try JSONDecoder().decode(Credentials.self, from: data)
     }
@@ -263,65 +275,71 @@ struct AgentSettingsView: View {
     @AppStorage("agentDeveloperMode") private var developer = false
     @State private var token = ""
     @State private var pairing = false
-    @State private var message = ""
+    @State private var message = "Offline"
     @State private var checking = false
+    @Environment(\.scenePhase) private var phase
+
+    private func check() async {
+        guard !checking else { return }
+        guard enabled, let base = AgentConfiguration.url else { message = "Offline"; return }
+        checking = true; message = "Connecting"
+        defer { checking = false }
+        do {
+            let token = try await AgentConfiguration.accessToken()
+            var request = URLRequest(url: base.appending(path: "agent/check"))
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            request.timeoutInterval = 10
+            let session = URLSession(configuration: .ephemeral, delegate: NoAgentRedirect(), delegateQueue: nil)
+            defer { session.finishTasksAndInvalidate() }
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { message = "Offline"; return }
+            let status = try JSONDecoder().decode(AgentConnectionStatus.self, from: data)
+            message = status.authenticated && status.modelConfigured ? "Connected" : "Offline"
+        } catch { message = "Offline" }
+    }
     var body: some View {
         Form {
             Section("Connection") {
-                TextField("https://your-backend.example", text: $url).textInputAutocapitalization(.never).autocorrectionDisabled()
-                SecureField("One-time pairing code", text: $token)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button(pairing ? "Pairing…" : "Pair this iPhone") {
-                    pairing = true
-                    Task {
-                        defer { pairing = false }
-                        do {
-                            guard let base = AgentConfiguration.validatedURL(AgentConfiguration.configuredBase) else { throw MapError.invalid("Enter the hosted HTTPS URL first.") }
-                            try await AgentConfiguration.pair(code: token.trimmingCharacters(in: .whitespacesAndNewlines), base: base)
-                            token = ""; enabled = true; message = "Phone paired."
-                        } catch { message = error.localizedDescription }
-                    }
-                }.disabled(pairing || token.isEmpty)
+                Label(message, systemImage: message == "Connected" ? "checkmark.circle.fill" : "wifi.slash")
+                    .accessibilityIdentifier("agentConnectionStatus")
                 Toggle("Cloud AI", isOn: $enabled)
-                Button(checking ? "Checking…" : "Check connection") {
-                    checking = true
-                    Task {
-                        defer { checking = false }
-                        do {
-                            guard let base = AgentConfiguration.url else {
-                                throw MapError.invalid("Enable the assistant and pair this phone first.")
-                            }
-                            let token = try await AgentConfiguration.accessToken()
-                            var request = URLRequest(url: base.appending(path: "agent/check"))
-                            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                            request.timeoutInterval = 10
-                            let session = URLSession(configuration: .ephemeral, delegate: NoAgentRedirect(), delegateQueue: nil)
-                            defer { session.finishTasksAndInvalidate() }
-                            let (data, response) = try await session.data(for: request)
-                            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                                throw MapError.invalid("Connection failed. Check the HTTPS URL and whether your app token has expired.")
-                            }
-                            let status = try JSONDecoder().decode(AgentConnectionStatus.self, from: data)
-                            message = status.authenticated && status.modelConfigured ? "Connected. Try a voice command." : "AI setup incomplete. Contact your administrator."
-                        } catch { message = error.localizedDescription }
-                    }
-                }.disabled(checking).accessibilityIdentifier("checkAgentConnection")
+                Button(checking ? "Connecting…" : "Check connection") { Task { await check() } }
+                    .disabled(checking).accessibilityIdentifier("checkAgentConnection")
                 Text("AI needs internet. Saved navigation works offline.").font(.footnote)
-                DisclosureGroup("Privacy & pairing") {
-                    Text("Shared with the server and OpenAI: command text, destination labels, route status, constraints and requested sign text.")
-                    Text("Camera images, audio recordings and position history stay on your phone. Indoor routing stays local.")
-                    Text("Get a pairing code from your administrator. Never enter an OpenAI API key.")
+                DisclosureGroup("Privacy") {
+                    Text("AI receives your command text, destination labels, route status, preferences and requested sign text.")
+                    Text("Camera images, audio recordings and position history stay on your phone.")
                 }.font(.footnote)
-                if !message.isEmpty { Text(message) }
             }
             Section("Developer") {
                 Toggle("Show agent timeline", isOn: $developer)
-                if developer { NavigationLink("Test navigation") { GuidanceTestView(store: store) }.accessibilityIdentifier("testNavigation") }
+                if developer {
+                    NavigationLink("Test navigation") { GuidanceTestView(store: store) }.accessibilityIdentifier("testNavigation")
+                    DisclosureGroup("Advanced connection") {
+                        TextField("Backend HTTPS URL", text: $url).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        SecureField("One-time pairing code", text: $token).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        Button(pairing ? "Pairing…" : "Pair this iPhone") {
+                            pairing = true
+                            Task {
+                                defer { pairing = false }
+                                do {
+                                    guard let base = AgentConfiguration.validatedURL(AgentConfiguration.configuredBase) else { throw MapError.invalid("Invalid backend URL.") }
+                                    try await AgentConfiguration.pair(code: token.trimmingCharacters(in: .whitespacesAndNewlines), base: base)
+                                    token = ""; enabled = true; await check()
+                                } catch { message = "Offline" }
+                            }
+                        }.disabled(pairing || token.isEmpty)
+                    }
+                }
             }
         }.navigationTitle("AI connection")
             .onAppear { url = AgentConfiguration.configuredBase }
+            .task { await check() }
+            .onChange(of: enabled) { _, _ in Task { await check() } }
+            .onChange(of: phase) { _, phase in if phase == .active { Task { await check() } } }
     }
 }
+
 struct AgentTimelineView: View {
     @ObservedObject var agent: NavigationAgent
     var body: some View {

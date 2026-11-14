@@ -2,6 +2,84 @@ import XCTest
 @testable import IndoorbilityCore
 
 final class NavigationReliabilityTests: XCTestCase {
+    func testSavedMapRecoveryWaitsForSustainedMeasuredTracking() {
+        var recovery = SavedMapRecovery()
+        let p = SpatialPoint(x: 4, y: 0, z: 0)
+        recovery.begin(lastPosition: p, time: 10)
+        XCTAssertFalse(recovery.update(mapMatched: false, trackingStable: true, position: p, time: 10))
+        for i in 1...20 {
+            XCTAssertFalse(recovery.update(mapMatched: true, trackingStable: true, position: p, time: 10+Double(i)/10))
+        }
+        XCTAssertTrue(recovery.update(mapMatched: true, trackingStable: true, position: p, time: 12.2))
+        recovery.reset()
+        XCTAssertFalse(recovery.isPending)
+    }
+    func testSavedMapRecoveryRejectsTeleportAndDoesNotRearmItself() {
+        var recovery = SavedMapRecovery()
+        recovery.begin(lastPosition: SpatialPoint(x: 4, y: 0, z: 0), time: 10)
+        XCTAssertFalse(recovery.update(mapMatched: true, trackingStable: true, position: SpatialPoint(x: 8, y: 0, z: 0), time: 10.1))
+        XCTAssertFalse(recovery.isPending)
+        for i in 2...40 {
+            XCTAssertFalse(recovery.update(mapMatched: true, trackingStable: true, position: SpatialPoint(x: 4, y: 0, z: 0), time: 10+Double(i)/10))
+        }
+    }
+    func testSavedMapRecoveryRejectsChangedFloorAndLongInterruption() {
+        var recovery = SavedMapRecovery()
+        let p = SpatialPoint(x: 4, y: 0, z: 0)
+        recovery.begin(lastPosition: p, time: 10)
+        XCTAssertFalse(recovery.update(mapMatched: true, trackingStable: true, position: SpatialPoint(x: 4, y: 3, z: 0), time: 10.1))
+        XCTAssertFalse(recovery.isPending)
+        recovery.begin(lastPosition: p, time: 10)
+        XCTAssertFalse(recovery.update(mapMatched: true, trackingStable: true, position: p, time: 21))
+        XCTAssertFalse(recovery.isPending)
+    }
+    func testSavedMapRecoveryRestartsSettlingAfterTrackingLoss() {
+        var recovery = SavedMapRecovery()
+        let p = SpatialPoint(x: 4, y: 0, z: 0)
+        recovery.begin(lastPosition: p, time: 10)
+        for i in 0...10 {
+            XCTAssertFalse(recovery.update(mapMatched: true, trackingStable: true, position: p, time: 10+Double(i)/10))
+        }
+        XCTAssertFalse(recovery.update(mapMatched: false, trackingStable: false, position: nil, time: 11.1))
+        for i in 12...31 {
+            XCTAssertFalse(recovery.update(mapMatched: true, trackingStable: true, position: p, time: 10+Double(i)/10))
+        }
+        XCTAssertTrue(recovery.update(mapMatched: true, trackingStable: true, position: p, time: 13.3))
+    }
+    func testSavedMapAcceptsNormalTrackingWithoutObservingIntermediateCallback() {
+        var map = SavedWorldMapTracking()
+        map.reset(loadedMap: true)
+        XCTAssertFalse(map.matched)
+        XCTAssertTrue(map.needsInitialMapOnResume)
+        map.trackingChanged(normal: true)
+        XCTAssertTrue(map.matched)
+        XCTAssertFalse(map.needsInitialMapOnResume)
+    }
+    func testTrackingLossHidesPositionButResumePreservesEstablishedFrame() {
+        var map = SavedWorldMapTracking()
+        map.reset(loadedMap: true)
+        map.trackingChanged(normal: false)
+        XCTAssertTrue(map.needsInitialMapOnResume)
+        map.trackingChanged(normal: true)
+        map.trackingChanged(normal: false)
+        XCTAssertFalse(map.matched)
+        XCTAssertFalse(map.needsInitialMapOnResume)
+        map.trackingChanged(normal: true)
+        XCTAssertTrue(map.matched)
+    }
+    func testFreshTrackingOrManualResetCannotInheritSavedMapMatch() {
+        var map = SavedWorldMapTracking()
+        map.trackingChanged(normal: true)
+        XCTAssertFalse(map.matched)
+        map.reset(loadedMap: true); map.trackingChanged(normal: true)
+        XCTAssertTrue(map.matched)
+        map.reset(loadedMap: false); map.trackingChanged(normal: true)
+        XCTAssertFalse(map.matched)
+        XCTAssertFalse(map.needsInitialMapOnResume)
+        map.reset(loadedMap: true)
+        XCTAssertFalse(map.matched)
+        XCTAssertTrue(map.needsInitialMapOnResume)
+    }
     func testLongRouteProcessingBenchmark() throws {
         let points = (0..<5000).map { SpatialPoint(x: Float($0)*0.2, y: 0, z: 0) }
         let marks = [ScanLandmark(label: "Entrance", kind: "entrance", position: points.first!),

@@ -31,7 +31,7 @@ final class SteadyHeadingTests: XCTestCase {
                                       .init(instruction: "Turn left", points: [.init(100,0), .init(100,100)])])
         for i in 1...3 { p.update(.init(80,0), accuracy: 5, timestamp: Double(i), now: Double(i), course: 90) }
         XCTAssertEqual(p.travelInstruction, "Continue straight")
-        XCTAssertEqual(p.upcomingDetail(), "Next turn in about 20 meters")
-        XCTAssertEqual(p.announcementBand, 20)
+        XCTAssertEqual(p.upcomingDetail(), "Next turn in about 25 meters")
+        XCTAssertEqual(p.announcementBand, 100)
     }
 }

@@ -19,6 +19,128 @@ final class HallwayNavigationTests: XCTestCase {
         try f.confirmEntrance()
         return f
     }
+    func testMatchedMapStartsAtMeasuredPositionWithoutManualEndpoints() throws {
+        var f = HallwayFollower(route: try route())
+        for i in 0...25 { f.update(position: p(4), heading: Float(i), time: Double(i)/10, trackingNormal: true) }
+        XCTAssertThrowsError(try f.startInRelocalizedMap(livePosition: p(4), relocalized: false))
+        try f.startInRelocalizedMap(livePosition: p(4), relocalized: true)
+        XCTAssertEqual(f.progress, 4, accuracy: 0.01)
+        XCTAssertEqual(f.remaining, 6, accuracy: 0.01)
+        XCTAssertEqual(f.state, .guiding)
+        XCTAssertFalse(f.localized) // Preserve segment guidance and room evidence checks.
+    }
+    func testMatchedPositionNearTheMiddleOfPathDoesNotRequireExactStartOrCenterline() throws {
+        var follower = HallwayFollower(route: try route())
+        let measured = p(4, 0.8)
+        for i in 0...25 {
+            follower.update(position: measured, heading: Float(i), time: Double(i)/10, trackingNormal: true)
+        }
+        XCTAssertThrowsError(try follower.startInRelocalizedMap(livePosition: measured, relocalized: false))
+        try follower.startInRelocalizedMap(livePosition: measured, relocalized: true)
+        XCTAssertEqual(follower.state, .guiding)
+        XCTAssertEqual(follower.progress, 4, accuracy: 0.01)
+        XCTAssertEqual(follower.remaining, 6, accuracy: 0.01)
+        XCTAssertEqual(follower.route.entrance.position, p(0))
+        XCTAssertEqual(follower.route.room.position, p(10))
+    }
+    func testMatchingAndPoseStabilityCanSettleTogetherWithoutSkippingEitherCheck() throws {
+        func startup(serialWindows: Bool, jumpAt: Int? = nil) throws -> Double {
+            var follower = HallwayFollower(route: try route())
+            var matching = SavedRouteRelocalization()
+            for i in 0...160 {
+                let time = Double(i) * 0.05
+                let position = p(jumpAt.map { i >= $0 ? 4.8 : 4 } ?? 4)
+                follower.update(position: position, heading: Float(i), time: time, trackingNormal: true)
+                let matched = matching.update(mapMatched: true,
+                    trackingStable: serialWindows ? follower.stable : true, position: position, time: time)
+                if matched && follower.stable && follower.state == .ready {
+                    try follower.startInRelocalizedMap(livePosition: position, relocalized: true)
+                    XCTAssertEqual(follower.state, .guiding)
+                    XCTAssertEqual(follower.progress, position.x, accuracy: 0.01)
+                    return time
+                }
+                XCTAssertNotEqual(follower.state, .guiding)
+            }
+            XCTFail("Valid measured positions did not settle")
+            return .infinity
+        }
+        let previous = try startup(serialWindows: true)
+        let parallel = try startup(serialWindows: false)
+        print("SYNTHETIC_MATCH_SETTLING: serial=\(previous)s; concurrent=\(parallel)s; sensor relocalization time excluded")
+        XCTAssertEqual(previous, 4, accuracy: 0.1)
+        XCTAssertEqual(parallel, 2, accuracy: 0.1)
+        // An impossible one-frame jump restarts both evidence windows.
+        XCTAssertGreaterThanOrEqual(try startup(serialWindows: false, jumpAt: 30), 3.5)
+    }
+    func testRecordedWalkFinishesAtItsMeasuredEndpointWithoutRoomSignClaim() throws {
+        var f = try ready()
+        XCTAssertThrowsError(try f.finishRecordedRoute(positionVerified: true))
+        try f.startInRelocalizedMap(livePosition: p(10), relocalized: true)
+        for i in 26...49 { f.update(position: p(10), heading: Float(i), time: Double(i)/10, trackingNormal: true) }
+        XCTAssertEqual(f.state, .nearRoom)
+        XCTAssertThrowsError(try f.finishRecordedRoute(positionVerified: false))
+        try f.finishRecordedRoute(positionVerified: true)
+        XCTAssertEqual(f.state, .arrived)
+        XCTAssertEqual(f.remaining, 0)
+        XCTAssertEqual(f.instruction, "You’ve arrived at the recorded endpoint.")
+        XCTAssertFalse(f.instruction.contains("Arrival confirmed"))
+    }
+    func testMatchedMapResumesSameRouteAfterTrackingInterruption() throws {
+        var f = try ready()
+        try f.startInRelocalizedMap(livePosition: p(4), relocalized: true)
+        let routeID = f.route.id, roomID = f.route.room.id
+        f.update(position: nil, heading: nil, time: 2.6, trackingNormal: false)
+        XCTAssertNil(f.position)
+        XCTAssertEqual(f.state, .trackingLost)
+        for i in 27...49 { f.update(position: p(4.2), heading: Float(i), time: Double(i)/10, trackingNormal: true) }
+        try f.resumeInRelocalizedMap(livePosition: p(4.2), relocalized: true)
+        XCTAssertEqual(f.route.id, routeID)
+        XCTAssertEqual(f.route.room.id, roomID)
+        XCTAssertEqual(f.progress, 4.2, accuracy: 0.01)
+        XCTAssertEqual(f.remaining, 5.8, accuracy: 0.01)
+        for i in 50...65 { f.update(position: p(4.2), heading: Float(i), time: Double(i)/10, trackingNormal: true) }
+        XCTAssertEqual(f.instruction, "Continue straight.")
+        XCTAssertEqual(f.state, .guiding)
+    }
+    func testMatchedMapResumeCannotJumpToDistantPartOfRoute() throws {
+        var f = try ready()
+        try f.startInRelocalizedMap(livePosition: p(4), relocalized: true)
+        XCTAssertThrowsError(try f.resumeInRelocalizedMap(livePosition: p(8), relocalized: true))
+        XCTAssertThrowsError(try f.resumeInRelocalizedMap(livePosition: p(4), relocalized: false))
+        XCTAssertThrowsError(try f.resumeInRelocalizedMap(livePosition: SpatialPoint(x: 4, y: 3, z: 0), relocalized: true))
+        XCTAssertEqual(f.progress, 4, accuracy: 0.01)
+        f.invalidate()
+        XCTAssertThrowsError(try f.resumeInRelocalizedMap(livePosition: p(4), relocalized: true))
+    }
+    func testMatchedMapResumeRejectsOverlappingSegmentsAndManualFrame() throws {
+        let path = [p(0), p(5), p(10), p(5), p(0), p(0, 2)]
+        let a = ScanLandmark(label: "Start", kind: "entrance", position: path.first!)
+        let b = ScanLandmark(label: "End", kind: "room", position: path.last!)
+        let route = HallwayRoute(id: UUID(), scanID: UUID(), entrance: a, room: b, path: path, confirmedAt: Date())
+        var f = HallwayFollower(route: route)
+        for i in 0...25 { f.update(position: p(0, 1), heading: 0, time: Double(i)/10, trackingNormal: true) }
+        try f.startInRelocalizedMap(livePosition: p(0, 1), relocalized: true)
+        XCTAssertThrowsError(try f.resumeInRelocalizedMap(livePosition: p(0, 0.2), relocalized: true))
+        var manual = try ready()
+        try manual.recover(using: ScanAlignment(yaw: 0, translation: p(1)), livePosition: p(3))
+        XCTAssertThrowsError(try manual.resumeInRelocalizedMap(livePosition: p(4), relocalized: true))
+    }
+    func testAutomaticMapStartRejectsWrongFloorAndUnstableTracking() throws {
+        var f = try ready()
+        XCTAssertThrowsError(try f.startInRelocalizedMap(livePosition: SpatialPoint(x: 4, y: 3, z: 0), relocalized: true))
+        f.invalidate()
+        XCTAssertThrowsError(try f.startInRelocalizedMap(livePosition: p(4), relocalized: true))
+    }
+    func testAutomaticMapStartRejectsOverlappingRouteSegments() throws {
+        let a = ScanLandmark(label: "Start", kind: "entrance", position: p(0))
+        let b = ScanLandmark(label: "End", kind: "room", position: p(0, 2))
+        let path = [p(0), p(5), p(10), p(5), p(0), p(0, 2)]
+        let route = HallwayRoute(id: UUID(), scanID: UUID(), entrance: a, room: b, path: path, confirmedAt: Date())
+        var f = HallwayFollower(route: route)
+        for i in 0...25 { f.update(position: p(5), heading: 0, time: Double(i)/10, trackingNormal: true) }
+        XCTAssertThrowsError(try f.startInRelocalizedMap(livePosition: p(5), relocalized: true))
+        XCTAssertNotEqual(f.state, .guiding)
+    }
     func testSavedMapRecoveryRequiresMatchingLandmarkAndStableTracking() throws {
         var f = try ready()
         XCTAssertThrowsError(try f.recoverInSavedMap(livePosition: p(5), landmark: p(5), relocalized: false))

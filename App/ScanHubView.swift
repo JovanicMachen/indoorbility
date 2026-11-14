@@ -4,6 +4,9 @@ import IndoorbilityCore
 struct ScanHubView: View {
     @ObservedObject var store: AppStore
     @StateObject private var library = ScanLibrary()
+    @StateObject private var memory = JourneyLibrary()
+    @State private var navigationTarget: IndoorJourneyTarget?
+    @State private var navigationError: String?
     @State private var signPresented = false
     @State private var pendingDelete: ScanDraft?
     @State private var deletionError: String?
@@ -11,8 +14,15 @@ struct ScanHubView: View {
         List {
             Section {
                 NavigationLink { RememberRouteView(settings: store) } label: {
-                    row("Record route", subtitle: "Choose a building, start and destination", symbol: "record.circle")
+                    row("Record route", subtitle: "Save a walk to a room", symbol: "record.circle")
                 }.accessibilityIdentifier("recordRoute")
+            }
+            ForEach(memory.buildingGroups) { building in
+                Section(building.name) {
+                    ForEach(building.rooms) { room in
+                        roomButton(room, building: building.name)
+                    }
+                }
             }
             Section {
                 DisclosureGroup("Map tools") {
@@ -44,15 +54,21 @@ struct ScanHubView: View {
                     }
                     .accessibilityAction(named: "Delete recording") { pendingDelete = draft }
                 }
-            } header: { Text("Saved routes") } footer: { Text("Swipe left or hold a recording to delete it.") }
+            } header: { Text("Recordings") } footer: { Text("Swipe left or hold a recording to delete it.") }
             if let error = library.error { Text(error).foregroundStyle(.red) }
             if let deletionError { Text(deletionError).foregroundStyle(.red) }
         }.navigationTitle("Routes").navigationBarTitleDisplayMode(.inline)
-            .onAppear { library.reload() }
+            .onAppear(perform: refresh)
+            .fullScreenCover(item: $navigationTarget, onDismiss: refresh) { target in
+                NavigationStack { DestinationJourneyView(target: target, settings: store, automaticallyStart: true) }
+            }
+            .alert("Directions unavailable", isPresented: Binding(get: { navigationError != nil }, set: { if !$0 { navigationError = nil } })) {
+                Button("OK") { navigationError = nil }
+            } message: { Text(navigationError ?? "") }
             .confirmationDialog("Delete this recording?", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible) {
                 if let draft = pendingDelete {
                     Button("Delete recording", role: .destructive) {
-                        do { try withAnimation { try library.delete(draft) }; deletionError = nil }
+                        do { try withAnimation { try library.delete(draft) }; memory.refresh(from: library); deletionError = nil }
                         catch { deletionError = "Could not delete recording: " + error.localizedDescription }
                         pendingDelete = nil
                     }
@@ -62,6 +78,29 @@ struct ScanHubView: View {
                 Text("Removes this route, its 3D scan and saved position map from this iPhone. Other recordings stay saved.")
             }
             .sheet(isPresented: $signPresented) { SignScanView(store: store) }
+    }
+    private func refresh() {
+        #if DEBUG && targetEnvironment(simulator)
+        configureRoomUITestFixture()
+        #endif
+        library.reload(); memory.refresh(from: library)
+    }
+    private func start(_ room: JourneyDestination) {
+        do { navigationTarget = try library.navigationTarget(room, preferences: store.preferences); navigationError = nil }
+        catch { navigationError = error.localizedDescription }
+    }
+    private func roomButton(_ room: JourneyDestination, building: String) -> some View {
+        let floor = memory.floorLabel(room)
+        let subtitle = (floor.map { "Level \($0) · " } ?? "") + "From \(memory.startingLabel(room))"
+        let spokenLabel = "\(room.room), \(building)" + (floor.map { ", level \($0)" } ?? "")
+        return Button { start(room) } label: {
+            HStack {
+                row(room.room, subtitle: subtitle, symbol: "door.left.hand.closed")
+                Spacer()
+                Image(systemName: "location.north.fill").foregroundStyle(Color.indoorTeal)
+            }
+        }.buttonStyle(.plain)
+            .accessibilityLabel(spokenLabel).accessibilityIdentifier("savedRoom-" + room.id.uuidString)
     }
     private func recordTitle(_ draft: ScanDraft) -> String {
         if let route = try? library.hallway(draft) { return route.entrance.label + " → " + route.room.label }
@@ -76,6 +115,42 @@ struct ScanHubView: View {
             }
         }.padding(.vertical, 8)
     }
+    #if DEBUG && targetEnvironment(simulator)
+    /// UI automation only. Synthetic display surfaces, with no camera/world-map
+    /// file or physical sensor evidence. Excluded from physical-device builds.
+    private func configureRoomUITestFixture() {
+        let id = UUID(uuidString: "51A6B6C9-0050-4000-8000-000000000005")!
+        let directory = library.directory(id), marker = directory.appending(path: "ui-test-fixture")
+        guard ProcessInfo.processInfo.arguments.contains("--saved-room-ui-test") else {
+            if FileManager.default.fileExists(atPath: marker.path) {
+                try? FileManager.default.removeItem(at: directory)
+                try? FileManager.default.removeItem(at: library.navigationGeometryCache(id))
+                try? FileManager.default.removeItem(at: library.navigationWorldMapCache(id))
+                try? JourneyLibrary().forget(scanID: id)
+            }
+            return
+        }
+        guard !FileManager.default.fileExists(atPath: directory.path) else { return }
+        do {
+            let start = ScanLandmark(label: "Simulated start", kind: "entrance", position: SpatialPoint(x: 0, y: 0, z: 0))
+            let end = ScanLandmark(label: "Room 005", kind: "room", position: SpatialPoint(x: 5, y: 0, z: 0))
+            let draft = ScanDraft(id: id, name: "SIMULATED UI Test Building", usesLiDAR: true, hasWorldMap: true,
+                samples: (0...10).map { ScanSample(position: SpatialPoint(x: Float($0)/2, y: 0, z: 0), segment: 0) },
+                landmarks: [start, end], meshVertexCount: 8, meshTriangleCount: 4)
+            let route = try HallwayRoute.make(draft: draft, entranceID: start.id, roomID: end.id, reviewed: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data().write(to: marker)
+            try JSONEncoder().encode(draft).write(to: directory.appending(path: "scan.json"), options: .atomic)
+            let surfaces = [-1.0, 1.0].map { z in
+                MeshRecord(vertices: [SpatialPoint(x: 0, y: -1, z: Float(z)), SpatialPoint(x: 5, y: -1, z: Float(z)),
+                    SpatialPoint(x: 5, y: 1, z: Float(z)), SpatialPoint(x: 0, y: 1, z: Float(z))], triangles: [0, 1, 2, 0, 2, 3])
+            }
+            try JSONEncoder().encode(surfaces).write(to: directory.appending(path: "mesh.json"), options: .atomic)
+            try library.saveHallway(route, draft: draft)
+            try library.publishRecording(route, draft: draft)
+        } catch { navigationError = "Simulator fixture failed: " + error.localizedDescription }
+    }
+    #endif
 }
 
 struct ScanDetailView: View {

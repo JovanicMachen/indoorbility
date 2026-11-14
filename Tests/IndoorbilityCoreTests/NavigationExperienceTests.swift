@@ -2,6 +2,24 @@ import XCTest
 @testable import IndoorbilityCore
 
 final class NavigationExperienceTests: XCTestCase {
+    func testSavedRoomsRemainScopedToTheirBuildingAndSortNaturally() {
+        func destination(_ building: String, _ room: String) -> JourneyDestination {
+            let a = ScanLandmark(label: "Start", kind: "entrance", position: SpatialPoint(x: 0, y: 0, z: 0))
+            let b = ScanLandmark(label: room, kind: "room", position: SpatialPoint(x: 5, y: 0, z: 0))
+            return JourneyDestination(route: HallwayRoute(id: UUID(), scanID: UUID(), entrance: a, room: b,
+                path: [a.position, b.position], confirmedAt: Date()), building: building)
+        }
+        let friend = destination("Friend Center", "Room 005")
+        let other = destination("Other Hall", "Room 005")
+        let groups = SavedDestinationBuilding.groups([other, destination(" friend   center ", "Room 10"),
+            friend, destination("Friend Center", "Room 2")])
+        XCTAssertEqual(groups.count, 2)
+        let first = groups.first { $0.id == "friend center" }!
+        XCTAssertEqual(first.rooms.map(\.room), ["Room 2", "Room 005", "Room 10"])
+        XCTAssertTrue(first.rooms.contains { $0.id == friend.id })
+        XCTAssertFalse(first.rooms.contains { $0.id == other.id })
+        XCTAssertEqual(groups.first { $0.id == "other hall" }?.rooms.map(\.id), [other.id])
+    }
     private func destination(_ room: String, building: String) -> JourneyDestination {
         let a = ScanLandmark(label: "North entrance", kind: "entrance", position: SpatialPoint(x: 0, y: 0, z: 0))
         let b = ScanLandmark(label: room, kind: "room", position: SpatialPoint(x: 4, y: 0, z: 0))
@@ -18,6 +36,13 @@ final class NavigationExperienceTests: XCTestCase {
         XCTAssertEqual(DestinationSearch.matches("105 Fri", in: [a,b]), [a])
         XCTAssertTrue(DestinationSearch.matches("999", in: [a,b]).isEmpty)
         XCTAssertTrue(DestinationSearch.matches("", in: [a,b]).isEmpty)
+    }
+    func testRoomNumberMayOmitLeadingZerosWithoutPickingAnAmbiguousMatch() {
+        let padded = destination("Room 006", building: "Friend Center")
+        let unpadded = destination("Room 6", building: "Other Hall")
+        XCTAssertEqual(DestinationSearch.matches("Room 6 Friend", in: [padded, unpadded]), [padded])
+        XCTAssertEqual(DestinationSearch.matches("Room 6", in: [padded, unpadded]).count, 2)
+        XCTAssertEqual(FriendCenter.search("Room 6 Friend Center").map(\.id), ["006"])
     }
     func testConfirmationExpiresAndCannotRepeat() {
         var confirmation = DestinationConfirmation(); let id = UUID()

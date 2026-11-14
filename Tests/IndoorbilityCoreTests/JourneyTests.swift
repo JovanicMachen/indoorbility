@@ -2,6 +2,28 @@ import XCTest
 @testable import IndoorbilityCore
 
 final class JourneyTests: XCTestCase {
+    func testAutomaticSavedRouteMatchRequiresSustainedWorldMapEvidence() {
+        var match = SavedRouteRelocalization()
+        let p = SpatialPoint(x: 3, y: 0, z: 0)
+        for i in 0...30 {
+            XCTAssertFalse(match.update(mapMatched: false, trackingStable: true, position: p, time: Double(i)/10))
+        }
+        for i in 31...50 {
+            XCTAssertFalse(match.update(mapMatched: true, trackingStable: true, position: p, time: Double(i)/10))
+        }
+        XCTAssertTrue(match.update(mapMatched: true, trackingStable: true, position: p, time: 5.2))
+        XCTAssertFalse(match.update(mapMatched: true, trackingStable: false, position: p, time: 5.3))
+        XCTAssertFalse(match.update(mapMatched: true, trackingStable: true, position: p, time: 5.4))
+    }
+    func testAutomaticSavedRouteMatchResetsForFrameGapsAndPositionJumps() {
+        var match = SavedRouteRelocalization()
+        let p = SpatialPoint(x: 0, y: 0, z: 0)
+        for i in 0...25 { _ = match.update(mapMatched: true, trackingStable: true, position: p, time: Double(i)/10) }
+        XCTAssertFalse(match.update(mapMatched: true, trackingStable: true, position: p, time: 4))
+        XCTAssertFalse(match.update(mapMatched: true, trackingStable: true, position: SpatialPoint(x: 5, y: 0, z: 0), time: 4.1))
+        XCTAssertFalse(match.update(mapMatched: true, trackingStable: true, position: p, time: .nan))
+        XCTAssertFalse(match.update(mapMatched: true, trackingStable: true, position: nil, time: 5))
+    }
     func update(_ handoff: inout EntranceHandoff, time: Double, gps: Double? = 10, accuracy: Double? = 5,
                 map: Bool = true, sign: Bool = true, near: Bool = true, tracking: Bool = true) -> EntranceHandoff.Phase {
         handoff.update(distanceToBuilding: gps, horizontalAccuracy: accuracy, mapMatches: map, entranceLabelMatches: sign,

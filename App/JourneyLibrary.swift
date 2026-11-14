@@ -14,14 +14,17 @@ struct EntranceLocation: Codable {
     @Published var error: String?
     private var groupKeys: [UUID: String] = [:]
     private var starts: [UUID: String] = [:]
+    private var floorLabels: [UUID: String] = [:]
     var preferredDestinations: [JourneyDestination] {
         var seen = Set<String>()
         return destinations.filter { seen.insert(groupKeys[$0.id] ?? $0.id.uuidString).inserted }
     }
+    var buildingGroups: [SavedDestinationBuilding] { SavedDestinationBuilding.groups(preferredDestinations) }
     func alternatives(to item: JourneyDestination) -> [JourneyDestination] {
         destinations.filter { groupKeys[$0.id] != nil && groupKeys[$0.id] == groupKeys[item.id] }
     }
     func startingLabel(_ item: JourneyDestination) -> String { starts[item.id] ?? "Confirmed start landmark" }
+    func floorLabel(_ item: JourneyDestination) -> String? { floorLabels[item.id] }
     private let url = URL.applicationSupportDirectory.appending(path: "Indoorbility/destinations.json")
     init() { reload() }
     func reload() {
@@ -61,7 +64,7 @@ struct EntranceLocation: Codable {
                 }
             }
             // Hide removed scans; never silently erase their saved visit history from disk.
-            groupKeys = [:]; starts = [:]
+            groupKeys = [:]; starts = [:]; floorLabels = [:]
             var evidence: [UUID: RecordingEvidence] = [:]
             destinations = destinations.filter { item in
                 guard let draft = scans.scans.first(where: { $0.id == item.scanID }),
@@ -72,7 +75,8 @@ struct EntranceLocation: Codable {
                 let review = (try? Data(contentsOf: directory.appending(path: "volunteer-review.json"))).flatMap { try? JSONDecoder().decode(VolunteerReview.self, from: $0) }
                 let validReview = review.flatMap { (try? $0.validate(for: route)) != nil ? $0 : nil }
                 let metadata = (try? Data(contentsOf: directory.appending(path: "room-metadata.json"))).flatMap { try? JSONDecoder().decode(VerifiedRoomMetadata.self, from: $0) }
-                let floor = metadata.flatMap { $0.buildingID == draft.id && $0.roomID == route.room.id ? $0.floorLabel : nil }
+                let floor = metadata.flatMap { $0.buildingID == draft.id && $0.roomID == route.room.id && !$0.floorLabel.isEmpty ? $0.floorLabel : nil } ?? validReview?.floorLabel
+                floorLabels[item.id] = floor
                 // Unknown-floor recordings remain separate; no number-to-floor inference.
                 groupKeys[item.id] = [item.building.lowercased().trimmingCharacters(in: .whitespaces), floor ?? item.id.uuidString, item.room.lowercased().trimmingCharacters(in: .whitespaces)].joined(separator: "|")
                 starts[item.id] = route.entrance.label

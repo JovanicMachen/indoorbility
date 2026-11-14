@@ -28,13 +28,13 @@ In a second terminal, issue a one-time phone pairing code:
 backend/.venv/bin/python backend/device_auth.py
 ```
 
-This operator command prints a pairing code valid for ten minutes. Enter it in the app's AI connection settings. It does not print the model key or server signing secret. One-time pairing creates a revocable device identity and renewable 15-minute access tokens. `issue_token.py` is retained only for development probes; production rejects those legacy tokens. For public distribution, define an identity/enrollment policy beyond operator pairing.
+This operator command prints a pairing code valid for ten minutes. Enter it in the app's AI connection settings. It does not print the model key or server signing secret. One-time pairing creates a revocable device identity and renewable 15-minute access tokens and durable, rotating device credentials. `issue_token.py` is retained only for development probes; production rejects those legacy tokens. For public distribution, define an identity/enrollment policy beyond operator pairing.
 
 ## Connect a physical iPhone
 
 1. Expose the loopback development server through a trusted HTTPS reverse proxy or HTTPS development tunnel. For example, if Cloudflare Tunnel is installed: `cloudflared tunnel --url http://127.0.0.1:8765`. Use the resulting HTTPS base URL. The service stays authenticated; do not remove authentication to make a tunnel work.
 2. Build the existing Indoorbility target in Xcode onto the phone with your existing signing team.
-3. Open **Settings → AI connection**. Enter the HTTPS base URL (without `/agent/turn`) and the one-time pairing code. Tap **Pair this iPhone**. Read the cloud data-sharing description before pairing; pairing enables **Use cloud navigation assistant**.
+3. Open **Settings → AI connection**, enable **Show agent timeline**, and open **Advanced connection**. Enter the HTTPS base URL (without `/agent/turn`) and the one-time pairing code. Tap **Pair this iPhone**, then turn developer mode off. Read the cloud data-sharing description before pairing.
 4. Enable **Show agent timeline** for the demonstration. During navigation it appears under **More → Agent timeline**.
 5. Do not enter `localhost` on a physical phone: that points to the phone, not your Mac. HTTPS is required by the client. No broad ATS exceptions or certificate-verification bypasses are added.
 

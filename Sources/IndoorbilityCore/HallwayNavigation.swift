@@ -126,6 +126,10 @@ public struct HallwayFollower {
     private let totalDistance: Float
     private let includesLevelChange: Bool
     private let turns: [LiveGuidance.MeasuredTurn]
+    public var recordedPreview: RecordedRoutePreview {
+        RecordedRoutePreview(firstLegDistance: turns.first?.along ?? totalDistance,
+                             firstTurn: turns.first?.direction, destination: route.room.label)
+    }
     public var nextMeasuredTurn: LiveGuidance.MeasuredTurn? {
         var low = 0, high = turns.count
         while low < high {
@@ -167,6 +171,22 @@ public struct HallwayFollower {
               livePosition.horizontalDistance(to: landmark) <= 1.2,
               abs(livePosition.y-landmark.y) < 0.8 else {
             throw MapError.invalid("Position does not match this landmark. Try another mark.")
+        }
+        try recover(using: .identity, livePosition: livePosition)
+    }
+    /// The saved world map already establishes the coordinate transform. Place
+    /// the user on its recorded path without asking them to enter two endpoints.
+    /// Existing recovery checks reject wrong floors and ambiguous intersections.
+    public mutating func startInRelocalizedMap(livePosition: SpatialPoint, relocalized: Bool) throws {
+        guard relocalized, livePosition.isFinite else { throw MapError.invalid("Match the saved 3D map first.") }
+        try recover(using: .identity, livePosition: livePosition)
+    }
+    /// Resume the same leg after a brief tracking interruption, without routing
+    /// back to the recording start or jumping to a distant/overlapping segment.
+    public mutating func resumeInRelocalizedMap(livePosition: SpatialPoint, relocalized: Bool) throws {
+        guard relocalized, alignment == .identity, livePosition.isFinite,
+              abs(project(livePosition, minimum: 0, maximum: totalDistance).along-progress) <= 1.5 else {
+            throw MapError.invalid("Position changed. Match this route at a known landmark.")
         }
         try recover(using: .identity, livePosition: livePosition)
     }
@@ -352,6 +372,16 @@ public struct HallwayFollower {
             throw MapError.invalid("Arrival needs stable tracking near the room and confirmation of its label.")
         }
         state = .arrived; instruction = "Arrival confirmed at \(route.room.label)."; progress = totalDistance; remaining = 0
+    }
+    /// Completes the recorded walk. This does not verify a room sign or certify
+    /// the destination's identity; callers must not record a verified room visit.
+    public mutating func finishRecordedRoute(positionVerified: Bool) throws {
+        guard positionVerified, state == .nearRoom, stable, let p = position,
+              p.distance(to: route.room.position) <= 0.8 else {
+            throw MapError.invalid("Match your position near the recorded endpoint first.")
+        }
+        state = .arrived; instruction = "You’ve arrived at the recorded endpoint."
+        progress = totalDistance; remaining = 0
     }
     private func point(at along: Float) -> SpatialPoint {
         let i = segmentIndex(at: along)

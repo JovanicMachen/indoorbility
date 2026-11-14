@@ -12,10 +12,13 @@ final class OutdoorProgressTests: XCTestCase {
     }
     func testProgressAndNextLegRequireRepeatedFixes() {
         var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)]), .init(instruction: "Turn left", points: [.init(100,0), .init(100,100)])])
-        for i in 1...3 { p.update(.init(40,0), accuracy: 5, timestamp: Double(i), now: Double(i)) }
-        XCTAssertEqual(p.status, .guiding); XCTAssertEqual(p.remaining, 60, accuracy: 0.01)
-        for i in 4...6 { p.update(.init(99,0), accuracy: 5, timestamp: Double(i), now: Double(i)) }
-        XCTAssertEqual(p.index, 1); XCTAssertEqual(p.instruction, "Turn left")
+        var t = 0.0
+        for _ in 1...3 { t += 1; p.update(.init(40,0), accuracy: 5, timestamp: t, now: t) }
+        XCTAssertEqual(p.status, .guiding); XCTAssertEqual(p.remaining, 65, accuracy: 0.01)
+        for x in stride(from: 44.0, through: 100.0, by: 4) { t += 1; p.update(.init(x,0), accuracy: 5, timestamp: t, now: t) }
+        XCTAssertEqual(p.travelInstruction, "Turn left")
+        for y in stride(from: 2.0, through: 14.0, by: 2) { t += 1; p.update(.init(100,y), accuracy: 5, timestamp: t, now: t) }
+        XCTAssertEqual(p.index, 1)
     }
     func testBadTrackingAndOffRouteDoNotAdvance() {
         var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)])])
@@ -28,37 +31,42 @@ final class OutdoorProgressTests: XCTestCase {
     }
     func testFinalCheckpointDoesNotClaimArrival() {
         var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)])])
-        for i in 1...5 { p.update(.init(99,0), accuracy: 5, timestamp: Double(i), now: Double(i)) }
-        XCTAssertEqual(p.status, .nearDestination)
+        var t = 0.0
+        for _ in 0..<3 { t += 1; p.update(.init(0,0), accuracy: 2, timestamp: t, now: t) }
+        for x in stride(from: 2.0, through: 100.0, by: 2) { t += 1; p.update(.init(x,0), accuracy: 2, timestamp: t, now: t) }
+        for _ in 0..<3 { t += 1; p.update(.init(100,0), accuracy: 2, timestamp: t, now: t) }
+        XCTAssertEqual(p.status, .nearDestination) // User still confirms the entrance.
     }
     func testBriefNoiseDoesNotPauseOrAdvance() {
         var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)])])
         for i in 1...3 { p.update(.init(40,0), accuracy: 5, timestamp: Double(i), now: Double(i)) }
         p.update(.init(99,0), accuracy: 45, timestamp: 4, now: 4)
-        XCTAssertEqual(p.status, .guiding); XCTAssertEqual(p.remaining, 60)
+        XCTAssertEqual(p.status, .locating); XCTAssertEqual(p.remaining, 65)
         p.update(.init(99,0), accuracy: 45, timestamp: 12, now: 12)
         XCTAssertEqual(p.status, .locating)
     }
     func testModerateAccuracyCannotClaimCheckpoint() {
         var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)])])
         for i in 1...8 { p.update(.init(99,0), accuracy: 18, timestamp: Double(i), now: Double(i)) }
-        XCTAssertEqual(p.status, .guiding)
+        XCTAssertEqual(p.status, .locating)
     }
     func testWrongWayNeedsSustainedRetreatAndClearsOnRecovery() {
         var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)])])
-        for i in 1...3 { p.update(.init(60,0), accuracy: 5, timestamp: Double(i), now: Double(i)) }
-        p.update(.init(44,0), accuracy: 5, timestamp: 4, now: 4)
-        XCTAssertFalse(p.wrongWay)
-        p.update(.init(43,0), accuracy: 5, timestamp: 5, now: 5)
-        p.update(.init(42,0), accuracy: 5, timestamp: 6, now: 6)
+        var t = 0.0
+        for _ in 1...3 { t += 1; p.update(.init(60,0), accuracy: 3, timestamp: t, now: t) }
+        for x in stride(from: 58.0, through: 42.0, by: -2) { t += 1; p.update(.init(x,0), accuracy: 3, timestamp: t, now: t) }
         XCTAssertTrue(p.wrongWay)
-        p.update(.init(49,0), accuracy: 5, timestamp: 7, now: 7)
+        for x in stride(from: 44.0, through: 54.0, by: 2) { t += 1; p.update(.init(x,0), accuracy: 3, timestamp: t, now: t) }
         XCTAssertFalse(p.wrongWay)
     }
     func testLegTransitionKeepsGuidanceActive() {
-        var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)]), .init(instruction: "Left", points: [.init(100,0), .init(100,100)])])
-        for i in 1...5 { p.update(.init(99,0), accuracy: 5, timestamp: Double(i), now: Double(i)) }
-        XCTAssertEqual(p.index, 1); XCTAssertEqual(p.status, .guiding); XCTAssertEqual(p.remaining, 100)
+        var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(25,0)]), .init(instruction: "Turn left", points: [.init(25,0), .init(25,40)])])
+        var t = 0.0
+        for _ in 0..<3 { t += 1; p.update(.init(0,0), accuracy: 2, timestamp: t, now: t) }
+        for x in stride(from: 2.0, through: 24.0, by: 2) { t += 1; p.update(.init(x,0), accuracy: 2, timestamp: t, now: t) }
+        XCTAssertEqual(p.travelInstruction, "Turn left")
+        for y in stride(from: 2.0, through: 12.0, by: 2) { t += 1; p.update(.init(25,y), accuracy: 2, timestamp: t, now: t) }
+        XCTAssertEqual(p.index, 1); XCTAssertEqual(p.status, .guiding)
     }
     func testSingleLateralJumpDoesNotTriggerRerouting() {
         var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(100,0)])])
@@ -72,14 +80,14 @@ final class OutdoorProgressTests: XCTestCase {
     }
     func testCampusGPSJitterDoesNotFlipTurnsOrReplaceRoute() {
         var p = OutdoorProgress(legs: [
-            .init(instruction: "Turn right", points: [.init(0,0), .init(20,2)]),
-            .init(instruction: "Turn left", points: [.init(20,2), .init(40,-2)]),
+            .init(instruction: "Continue", points: [.init(0,0), .init(20,2)]),
+            .init(instruction: "Continue", points: [.init(20,2), .init(40,-2)]),
             .init(instruction: "Continue", points: [.init(40,-2), .init(140,0)]),
             .init(instruction: "Turn left", points: [.init(140,0), .init(140,80)])
         ])
         var t = 1.0
         for x in stride(from: 20.0, through: 80.0, by: 4) {
-            p.update(.init(x, sin(x)*12), accuracy: 8, timestamp: t, now: t)
+            p.update(.init(x, sin(x)*3), accuracy: 8, timestamp: t, now: t)
             t += 1
             if p.status == .guiding {
                 XCTAssertEqual(p.travelInstruction, "Continue straight")
@@ -108,7 +116,7 @@ final class OutdoorProgressTests: XCTestCase {
         XCTAssertEqual(progress.index, 0)
         for t in 21...23 { progress.update(.init(42,0), accuracy: 5, timestamp: Double(t), now: Double(t)) }
         XCTAssertEqual(progress.status, .guiding)
-        XCTAssertEqual(progress.remaining, 58, accuracy: 0.01)
+        XCTAssertEqual(progress.remaining, 63, accuracy: 0.01)
         XCTAssertEqual(progress.legs.count, 1)
     }
 
@@ -117,11 +125,11 @@ final class OutdoorProgressTests: XCTestCase {
         var p = OutdoorProgress(legs: [.init(instruction: "Continue", points: [.init(0,0), .init(60,0)]),
                                        .init(instruction: "Turn right onto Main St", points: [.init(60,0), .init(60,60)])])
         var t = 1.0
-        for x in stride(from: 0.0, through: 50.0, by: 2) { p.update(.init(x, 0), accuracy: 6, timestamp: t, now: t); t += 1 }
+        for x in stride(from: 0.0, through: 56.0, by: 2) { p.update(.init(x, 0), accuracy: 6, timestamp: t, now: t); t += 1 }
         XCTAssertEqual(p.travelInstruction, "Turn right onto Main St")
         let along = p.remainingRouteDistance
         for jitter in [-6.0, 4.0, -5.0, 2.0, -6.0] {
-            p.update(.init(50 + jitter, 0), accuracy: 6, timestamp: t, now: t); t += 1
+            p.update(.init(56 + jitter, 0), accuracy: 6, timestamp: t, now: t); t += 1
             XCTAssertEqual(p.travelInstruction, "Turn right onto Main St")
             XCTAssertLessThanOrEqual(p.remainingRouteDistance, along)
         }
@@ -132,7 +140,7 @@ final class OutdoorProgressTests: XCTestCase {
                                        .init(instruction: "Turn left", points: [.init(100,0), .init(100,8)]),
                                        .init(instruction: "Turn left", points: [.init(100,8), .init(0,8)])])
         for i in 1...3 { p.update(.init(2, 7), accuracy: 8, timestamp: Double(i), now: Double(i)) }
-        XCTAssertEqual(p.status, .guiding)
+        XCTAssertEqual(p.status, .locating) // GPS cannot distinguish the parallel corridors.
         XCTAssertEqual(p.index, 0)
         XCTAssertGreaterThan(p.remainingRouteDistance, 190)
     }

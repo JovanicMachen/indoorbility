@@ -2,6 +2,62 @@ import XCTest
 @testable import IndoorbilityCore
 
 final class LiveGuidanceTests: XCTestCase {
+    func testRecordingStartWobbleIsNotAZeroDistanceTurn() {
+        let path = [SpatialPoint(x: 0, y: 0, z: 0), .init(x: 0.02, y: 0, z: 0.2), .init(x: 0.2, y: 0, z: 0.2)]
+            + (1...10).map { SpatialPoint(x: Float($0), y: 0, z: 0.2) }
+        XCTAssertTrue(LiveGuidance.measuredTurns(path).isEmpty)
+        XCTAssertEqual(LiveGuidance.distance(0.2, feet: false), "less than 1 meter")
+        XCTAssertEqual(LiveGuidance.distance(0.02, feet: true), "less than 1 foot")
+        XCTAssertEqual(LiveGuidance.distance(1, feet: false), "1 meter")
+        XCTAssertEqual(LiveGuidance.distance(-1, feet: false), "distance unavailable")
+        XCTAssertEqual(LiveGuidance.distance(.infinity, feet: true), "distance unavailable")
+        XCTAssertEqual(LiveGuidance.distance(.greatestFiniteMagnitude, feet: true), "distance unavailable")
+    }
+    func testGenuineEarlyTurnRemainsAndPreviewShowsTurnAtStart() {
+        for sign: Float in [-1, 1] {
+            let path = (0...10).map { SpatialPoint(x: Float($0)/10, y: 0, z: 0) }
+                + (1...50).map { SpatialPoint(x: 1, y: 0, z: sign*Float($0)/10) }
+            let turns = LiveGuidance.measuredTurns(path)
+            XCTAssertEqual(turns.count, 1)
+            XCTAssertEqual(turns.first?.direction, sign < 0 ? "left" : "right")
+            let preview = RecordedRoutePreview(firstLegDistance: 0.2, firstTurn: sign < 0 ? "left" : "right", destination: "End")
+            XCTAssertEqual(preview.instruction(feet: false), "At the recorded start, turn " + (sign < 0 ? "left" : "right"))
+            XCTAssertEqual(preview.symbol, sign < 0 ? "arrow.turn.up.left" : "arrow.turn.up.right")
+            XCTAssertFalse(preview.narration(feet: false).contains("0 meters"))
+        }
+    }
+    func testRecordedPreviewShowsDirectionsWithoutClaimingALivePosition() throws {
+        let straight = (0...10).map { SpatialPoint(x: Float($0), y: 0, z: 0) }
+        for sign: Float in [-1, 1] {
+            let path = straight + (1...10).map { SpatialPoint(x: 10, y: 0, z: sign*Float($0)) }
+            let marks = [ScanLandmark(label: "Start", kind: "entrance", position: path[0]),
+                         ScanLandmark(label: "End", kind: "room", position: path.last!)]
+            let draft = ScanDraft(name: "Synthetic preview only", usesLiDAR: true, hasWorldMap: true,
+                samples: path.map { .init(position: $0, segment: 0) }, landmarks: marks, meshVertexCount: 30, meshTriangleCount: 10)
+            let route = try HallwayRoute.make(draft: draft, entranceID: marks[0].id, roomID: marks[1].id, reviewed: true)
+            var follower = HallwayFollower(route: route)
+            let preview = follower.recordedPreview
+            XCTAssertEqual(preview.firstTurn, sign < 0 ? "left" : "right")
+            XCTAssertEqual(preview.firstLegDistance, 10, accuracy: 1)
+            XCTAssertTrue(preview.instruction(feet: true).contains("feet"))
+            XCTAssertTrue(preview.narration(feet: false).contains("Your live position is not matched"))
+            XCTAssertNil(follower.position)
+            XCTAssertEqual(follower.progress, 0)
+            XCTAssertFalse(follower.stable)
+            XCTAssertThrowsError(try follower.confirmArrival())
+            follower.invalidate()
+            XCTAssertEqual(follower.recordedPreview.instruction(feet: true), preview.instruction(feet: true))
+            XCTAssertEqual(follower.state, .trackingLost)
+        }
+    }
+    func testTravelLoopRespectsTravelMuteAndLifecycleIndependentlyOfTurnCues() {
+        XCTAssertTrue(GuidanceSoundPolicy.journeyLoopAllowed(travelling: true, muted: false, enabled: true, suspended: false, active: true))
+        XCTAssertFalse(GuidanceSoundPolicy.journeyLoopAllowed(travelling: false, muted: false, enabled: true, suspended: false, active: true))
+        XCTAssertFalse(GuidanceSoundPolicy.journeyLoopAllowed(travelling: true, muted: true, enabled: true, suspended: false, active: true))
+        XCTAssertFalse(GuidanceSoundPolicy.journeyLoopAllowed(travelling: true, muted: false, enabled: false, suspended: false, active: true))
+        XCTAssertFalse(GuidanceSoundPolicy.journeyLoopAllowed(travelling: true, muted: false, enabled: true, suspended: true, active: true))
+        XCTAssertFalse(GuidanceSoundPolicy.journeyLoopAllowed(travelling: true, muted: false, enabled: true, suspended: false, active: false))
+    }
     func testStationaryPhoneRotationsNeverChangeStraightRouteInstruction() throws {
         let points = (0...30).map { SpatialPoint(x: Float($0), y: 0, z: 0) }
         let marks = [ScanLandmark(label: "Start", kind: "entrance", position: points[0]),
@@ -46,6 +102,12 @@ final class LiveGuidanceTests: XCTestCase {
                         time += 0.1; let t = Float(step)/10
                         f.update(position: SpatialPoint(x: a.x+(b.x-a.x)*t, y: 0, z: a.z+(b.z-a.z)*t), heading: heading, time: time, trackingNormal: true)
                         let message = LiveGuidance.message(f)
+                        let symbol = LiveGuidance.symbol(for: message.primary ?? message.text, reliable: f.stable && f.state == .guiding)
+                        if message.cue == .turn {
+                            XCTAssertEqual(symbol, sign < 0 ? "arrow.turn.up.left" : "arrow.turn.up.right")
+                        } else if message.primary?.hasPrefix("Continue straight") == true { XCTAssertEqual(symbol, "arrow.up") }
+                        XCTAssertEqual(f.route.entrance, marks[0])
+                        XCTAssertEqual(f.route.room, marks[1])
                         if delivery.consume(message, listening: false) { texts.append(message.text) }
                     }
                 }
@@ -94,7 +156,7 @@ final class LiveGuidanceTests: XCTestCase {
     func testDistanceAndDelivery() {
         XCTAssertEqual(LiveGuidance.distance(100, feet: false), "100 meters")
         XCTAssertEqual(LiveGuidance.distance(1, feet: true), "3 feet")
-        XCTAssertEqual(LiveGuidance.distance(.nan, feet: false), "0 meters")
+        XCTAssertEqual(LiveGuidance.distance(.nan, feet: false), "distance unavailable")
         var delivery = GuidanceDelivery()
         let m = GuidanceMessage(id: "turn", text: "Turn left now.", cue: .turn)
         XCTAssertFalse(delivery.consume(m, listening: true))
@@ -131,8 +193,12 @@ final class LiveGuidanceTests: XCTestCase {
         for _ in 0...25 { time += 0.1; f.update(position: path.last!, heading: 0, time: time, trackingNormal: true) }
         try f.confirmArrival()
         XCTAssertEqual(LiveGuidance.message(f).cue, .arrived)
+        XCTAssertEqual(LiveGuidance.symbol(for: LiveGuidance.message(f).text, reliable: true), "checkmark.circle.fill")
+        XCTAssertEqual(f.route.entrance, marks[0])
+        XCTAssertEqual(f.route.room, marks[1])
         f.invalidate()
         XCTAssertEqual(LiveGuidance.message(f).cue, .attention)
         XCTAssertFalse(LiveGuidance.message(f).text.contains("Turn left"))
+        XCTAssertEqual(LiveGuidance.symbol(for: LiveGuidance.message(f).text, reliable: false), "pause.fill")
     }
 }

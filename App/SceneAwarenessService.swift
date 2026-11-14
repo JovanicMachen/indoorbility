@@ -179,7 +179,9 @@ enum FloorSensor {
         let floors = frame.anchors.compactMap { $0 as? ARPlaneAnchor }.filter {
             guard $0.alignment == .horizontal, $0.classification == .floor else { return false }
             let p = simd_inverse($0.transform) * point
-            return abs(p.x - $0.center.x) < $0.extent.x / 2 && abs(p.z - $0.center.z) < $0.extent.z / 2 && p.y > 0.3 && p.y < 2.5
+            let extent = $0.planeExtent
+            return FloorPlaneBounds.contains(x: p.x - $0.center.x, z: p.z - $0.center.z,
+                width: extent.width, height: extent.height, yaw: extent.rotationOnYAxis) && p.y > 0.3 && p.y < 2.5
         }
         guard let floor = floors.max(by: { $0.transform.columns.3.y < $1.transform.columns.3.y }),
               let depth = frame.sceneDepth, let confidence = depth.confidenceMap else { return .unknown }

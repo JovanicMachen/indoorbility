@@ -18,6 +18,7 @@ import SwiftUI
     private var token = UUID()
     private var tapped = false
     private var ownsAudio = false
+    private var audioLease: UUID?
     private var completion: ((String) -> Void)?
     private var interruption: AnyCancellable?
     init() {
@@ -47,9 +48,9 @@ import SwiftUI
             fail("On-device English speech recognition is unavailable. Use the buttons or optional face controls."); return
         }
         do {
-            let audio = AVAudioSession.sharedInstance()
-            try audio.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
-            try audio.setActive(true); ownsAudio = true
+            try await AppAudioWorker.shared.beginRecording(lease: current)
+            guard current == token else { await AppAudioWorker.shared.endRecording(lease: current); return }
+            ownsAudio = true; audioLease = current
             let input = engine.inputNode
             let format = input.outputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else { fail("No microphone input is available."); return }
@@ -93,7 +94,10 @@ import SwiftUI
                 guard !Task.isCancelled, self?.token == current else { return }
                 self?.finish()
             }
-        } catch { fail("Microphone could not start. Please try again or use the buttons.") }
+        } catch {
+            guard current == token else { return }
+            fail("Microphone could not start. Please try again or use the buttons.")
+        }
     }
     func finish() {
         guard listening else { return }
@@ -125,7 +129,10 @@ import SwiftUI
     private func stopAudio(deactivate: Bool = true) {
         engine.stop()
         if tapped { engine.inputNode.removeTap(onBus: 0); tapped = false }
-        if deactivate && ownsAudio { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation); ownsAudio = false }
+        if deactivate && ownsAudio, let lease = audioLease {
+            ownsAudio = false; audioLease = nil
+            Task { await AppAudioWorker.shared.endRecording(lease: lease) }
+        }
     }
     private func fail(_ message: String) { cancel(); status = message }
 }

@@ -34,7 +34,7 @@ public enum FriendCenter {
         guard !tokens.isEmpty else { return [] }
         if tokens.contains("frist") { return [] }
         let numeric = tokens.filter { $0.allSatisfy(\.isNumber) }
-        if !numeric.isEmpty { return rooms.filter { numeric.contains($0.id) } }
+        if !numeric.isEmpty { return rooms.filter { room in numeric.contains { $0 == room.id || (Int($0) != nil && Int($0) == Int(room.id)) } } }
         return tokens.contains("friend") ? rooms : []
     }
     public static func recognizedRooms(in text: String) -> [Room] {

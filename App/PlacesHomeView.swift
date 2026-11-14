@@ -20,6 +20,9 @@ struct PlacesHomeView: View {
     @State private var requestedRoom: RoomMappingRequest?
     @SceneStorage("selectedRoomBuilding") private var selectedRoomBuilding = ""
     @State private var selected: IndoorJourneyTarget?
+    @State private var pendingIndoorTarget: IndoorJourneyTarget?
+    @State private var pendingEntrance: EntranceLocation?
+    @State private var chooseStartingLocation = false
     @State private var proposal: JourneyDestination?
     @State private var confirmation = DestinationConfirmation()
     @State private var outdoorProposal: MKMapItem?
@@ -44,6 +47,9 @@ struct PlacesHomeView: View {
         guard selectedRoomBuilding == FriendCenter.name || text.contains("friend") || text.contains("frend") else { return [] }
         return FriendCenter.search(query)
     }
+    private var hasIndoorRoomMatches: Bool {
+        !matches.isEmpty || (!knownFriendRooms.isEmpty && RoomMappingRequest.friend(query) != nil)
+    }
     private var placeSearchText: String { RoomMappingRequest.attached(query)?.building ?? query }
     private var searchExpanded: Bool {
         searchFocused || !query.isEmpty || proposal != nil || outdoorProposal != nil || !message.isEmpty || voice.busy
@@ -57,8 +63,8 @@ struct PlacesHomeView: View {
         }
     }
     var body: some View {
+        GeometryReader { viewport in
         ZStack {
-            Color.indoorBackground.ignoresSafeArea()
             if !searchExpanded && !highContrast {
                 DestinationBackdrop()
             }
@@ -91,7 +97,7 @@ struct PlacesHomeView: View {
                         .shadow(color: Color.indoorTeal.opacity(highContrast ? 0 : 0.07), radius: 16, y: 5)
                     }.padding(.horizontal, searchExpanded ? 0 : 8)
                         .frame(maxWidth: .infinity, minHeight: searchExpanded ? nil : max(0, geometry.size.height - 48))
-                        .offset(y: searchExpanded ? 0 : min(30, geometry.size.height * 0.04))
+                        .offset(y: searchExpanded ? 0 : min(110, max(0, geometry.size.height - 260) * 0.6))
                     if proposal != nil || outdoorProposal != nil {
                         Panel {
                             Text("Your destination").font(.headline)
@@ -121,7 +127,7 @@ struct PlacesHomeView: View {
                     } else if !query.isEmpty {
                         destinationResults
                     }
-                    if !query.isEmpty && !google.results.isEmpty && proposal == nil && outdoorProposal == nil {
+                    if !query.isEmpty && !hasIndoorRoomMatches && !google.results.isEmpty && proposal == nil && outdoorProposal == nil {
                         DisclosureGroup("More places · Google Maps") {
                             ForEach(google.results) { place in
                                 VStack(alignment: .leading, spacing: 4) {
@@ -165,13 +171,19 @@ struct PlacesHomeView: View {
             // invokes onDisappear and cancels recognition as soon as listening starts.
             voiceAndAccessibility
                 .padding(searchFocused ? 0 : 24)
+                // Lift the idle controls toward the middle while preserving
+                // their identity and the keyboard/search-results layout.
+                .padding(.bottom, searchExpanded ? 0 : min(120, viewport.size.height * 0.14))
                 .frame(maxWidth: .infinity)
                 .frame(height: searchFocused ? 0 : nil)
                 .clipped()
                 .opacity(searchFocused ? 0 : 1)
                 .allowsHitTesting(!searchFocused)
                 .accessibilityHidden(searchFocused)
-                .background(Color.indoorBackground)
+        }
+        .background {
+            Color.indoorBackground.ignoresSafeArea()
+            if !searchExpanded && !highContrast { HomeHolidayBackdrop() }
         }
 
         .swipeLeftToGoBack(action: goBack)
@@ -212,6 +224,21 @@ struct PlacesHomeView: View {
             assistant.agent.cancel(); confirmation.cancel(); proposal = nil; outdoorProposal = nil; searched = false; searchGeneration = UUID()
         }
         .onChange(of: voice.busy) { _, busy in if !busy && !voice.status.hasPrefix("Heard:") { message = voice.status } }
+        .confirmationDialog("Where are you starting?", isPresented: $chooseStartingLocation, titleVisibility: .visible) {
+            Button("I’m at the route start") {
+                if let target = pendingIndoorTarget { selected = target }
+                pendingIndoorTarget = nil; pendingEntrance = nil
+            }
+            Button("Walking directions to the start") {
+                if let target = pendingIndoorTarget, let pin = pendingEntrance {
+                    let place = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: pin.latitude, longitude: pin.longitude)))
+                    place.name = target.draft.name
+                    selectedOutdoorRoom = nil; outdoorIndoor = target; outdoorConfirmed = place; showOutdoor = true
+                }
+                pendingIndoorTarget = nil; pendingEntrance = nil
+            }
+            Button("Cancel", role: .cancel) { pendingIndoorTarget = nil; pendingEntrance = nil }
+        } message: { Text("GPS suggests the saved start may be farther away. Choose where you are.") }
         .sheet(item: $requestedRoom, onDismiss: {
             library.reload(); memory.refresh(from: library); assistant.catalog = memory.preferredDestinations
         }) { request in RecordDestinationView(settings: store, request: request) }
@@ -270,6 +297,7 @@ struct PlacesHomeView: View {
         } }
         .fullScreenCover(item: $selected) { target in HallwayLaunchView(route: target.route, draft: target.draft, library: target.library, settings: store) }
         .fullScreenCover(isPresented: $showOutdoor) { if let outdoorConfirmed { NavigationStack { OutdoorRouteView(destination: outdoorConfirmed, settings: store, indoor: outdoorIndoor, automaticallyStart: true, initialRoom: selectedOutdoorRoom) } } }
+        }
     }
     private func goBack() {
         guard searchExpanded else { return }
@@ -281,7 +309,7 @@ struct PlacesHomeView: View {
         voice.cancel(); assistant.agent.cancel(); outdoor.cancel(); google.cancel()
         suggestions.update("", near: nil); confirmation.cancel(); store.stopSpeech()
         searchGeneration = UUID(); proposal = nil; outdoorProposal = nil
-        query = ""; resolvingQuery = ""; message = ""; searched = false
+        query = ""; resolvingQuery = ""; message = ""; searched = false; selectedRoomBuilding = ""
         voiceCorrection = nil; voice.clearTranscript()
     }
     private func submitMapSearch() {
@@ -300,7 +328,9 @@ struct PlacesHomeView: View {
                                     .background(Color.indoorCard, in: RoundedRectangle(cornerRadius: 20))
                             }.buttonStyle(.plain)
                         }
-                        ForEach(knownFriendRooms) { room in
+                        ForEach(knownFriendRooms.filter { room in
+                            !matches.contains { $0.building == FriendCenter.name && FriendCenter.search($0.room).contains(where: { $0.id == room.id }) }
+                        }) { room in
                             Button { chooseKnownRoom(room) } label: {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("Room \(room.id) · Friend Center").font(.headline)
@@ -315,10 +345,10 @@ struct PlacesHomeView: View {
                         }
                         ForEach(matches.prefix(5)) { item in
                             Button { propose(item) } label: {
-                                HStack { Image(systemName: "door.left.hand.closed"); VStack(alignment: .leading) { Text(item.room).font(.headline); Text(item.building).font(.subheadline); if let entrance = entranceLocation(item) { distanceLabel(to: CLLocation(latitude: entrance.latitude, longitude: entrance.longitude)) } }; Spacer(); Image(systemName: "chevron.right") }.padding().background(Color.indoorCard, in: RoundedRectangle(cornerRadius: 20))
+                                HStack { Image(systemName: "door.left.hand.closed"); VStack(alignment: .leading) { Text(item.room).font(.headline); Text(item.building).font(.subheadline) }; Spacer(); Image(systemName: "chevron.right") }.padding().background(Color.indoorCard, in: RoundedRectangle(cornerRadius: 20))
                             }.buttonStyle(.plain)
                         }
-                        if !suggestions.results.isEmpty {
+                        if !hasIndoorRoomMatches && !suggestions.results.isEmpty {
                             Text(nearby.location == nil ? "Places · Princeton area" : "Places near you").font(.caption).foregroundStyle(.secondary)
                             ForEach(Array(suggestions.results.prefix(5).enumerated()), id: \.offset) { _, item in
                                 Button {
@@ -337,8 +367,8 @@ struct PlacesHomeView: View {
                                 }.buttonStyle(.plain)
                             }
                         }
-                        if outdoor.loading { ProgressView("Checking places…") }
-                        if searched { ForEach(Array(outdoor.results.prefix(5).enumerated()), id: \.offset) { _, item in
+                        if !hasIndoorRoomMatches && outdoor.loading { ProgressView("Checking places…") }
+                        if !hasIndoorRoomMatches && searched { ForEach(Array(outdoor.results.prefix(5).enumerated()), id: \.offset) { _, item in
                             Button { openOutdoor(item) } label: {
                                 VStack(alignment: .leading) { Text(item.name ?? "Place").font(.headline); Text(item.placemark.title ?? "").font(.caption); if let point = item.placemark.location { distanceLabel(to: point) } }.frame(maxWidth: .infinity, alignment: .leading).padding().background(Color.indoorCard, in: RoundedRectangle(cornerRadius: 20))
                             }.buttonStyle(.plain)
@@ -402,6 +432,7 @@ struct PlacesHomeView: View {
                 return
             }
         }
+        if matches.count == 1 { propose(matches[0]); return }
         if RoomMappingRequest.roomNumber(query) != nil && selectedRoomBuilding.isEmpty {
             message = "Which building is this room in? Choose a building first, then enter the room number."
             store.speak(message, force: true); return
@@ -453,16 +484,15 @@ struct PlacesHomeView: View {
         store.stopSpeech()
         if let item = proposal {
             do {
-                guard let draft = library.scans.first(where: { $0.id == item.scanID }), let route = try library.hallway(draft), route.id == item.routeID else { throw MapError.invalid("This saved route is unavailable. Review it in Settings → Your maps.") }
-                guard try library.navigationStore(route).blockedEdges.isEmpty else { throw MapError.invalid("This route has a reported closure. Choose another reviewed recording.") }
-                guard library.visitorReady(route) else { throw MapError.invalid("This route needs its volunteer field review before navigation is available.") }
-                let target = IndoorJourneyTarget(route: route, draft: draft, library: library)
-                // Like a normal GPS: far away → walk there by GPS, camera takes over at the entrance.
-                if let pin = entranceLocation(item), let fix = nearby.location, fix.horizontalAccuracy >= 0, fix.horizontalAccuracy <= 65,
-                   fix.distance(from: CLLocation(latitude: pin.latitude, longitude: pin.longitude)) > 60 {
-                    let place = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: pin.latitude, longitude: pin.longitude)))
-                    place.name = draft.name
-                    selectedOutdoorRoom = nil; outdoorIndoor = target; outdoorConfirmed = place; showOutdoor = true
+                let target = try library.navigationTarget(item, preferences: store.preferences)
+                if let pin = entranceLocation(item), let fix = nearby.location,
+                   DestinationProximity.shouldAskAboutOutdoorDirections(
+                       distance: fix.distance(from: CLLocation(latitude: pin.latitude, longitude: pin.longitude)),
+                       fixAccuracy: fix.horizontalAccuracy, pinAccuracy: pin.accuracy,
+                       fixAge: abs(fix.timestamp.timeIntervalSinceNow)) {
+                    // A saved GPS pin may have been recorded indoors or moved. Ask
+                    // instead of sending someone away from their actual location.
+                    pendingIndoorTarget = target; pendingEntrance = pin; chooseStartingLocation = true
                 } else { selected = target }
             } catch { message = error.localizedDescription }
         } else if let item = outdoorProposal { outdoorIndoor = nil; selectedOutdoorRoom = RoomMappingRequest.resolve(query, selectedBuilding: selectedRoomBuilding)?.room; outdoorConfirmed = item; showOutdoor = true }
@@ -520,6 +550,8 @@ struct DestinationJourneyView: View {
     @AppStorage("highContrast") private var highContrast = false
     let target: IndoorJourneyTarget
     @ObservedObject var settings: AppStore
+    var automaticallyStart = false
+    @State private var automaticLaunchConsumed = false
     @State private var camera = false
     @State private var outdoor = false
     @StateObject private var here = OutdoorLocation()
@@ -532,7 +564,12 @@ struct DestinationJourneyView: View {
     /// One button, like a normal GPS: walk to the building by GPS, then the camera
     /// takes over inside the saved 3D map. Close by (or no GPS pin), go straight to camera.
     private func startNavigation() {
-        if let distance = distanceToEntrance, distance > 60 { outdoor = true } else { camera = true }
+        if let entrance, let fix = here.location,
+           DestinationProximity.shouldAskAboutOutdoorDirections(
+                distance: fix.distance(from: CLLocation(latitude: entrance.latitude, longitude: entrance.longitude)),
+                fixAccuracy: fix.horizontalAccuracy, pinAccuracy: entrance.accuracy, fixAge: abs(fix.timestamp.timeIntervalSinceNow)) {
+            outdoor = true
+        } else { camera = true }
     }
     private var entrance: EntranceLocation? {
         guard let data = try? Data(contentsOf: target.library.directory(target.draft.id).appending(path: "entrance-location.json")),
@@ -541,6 +578,11 @@ struct DestinationJourneyView: View {
         return value
     }
     var body: some View {
+        Group {
+        if automaticallyStart {
+            ProgressView("Opening \(target.route.room.label)…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.indoorBackground)
+        } else {
         List {
             Section {
                 Text(target.route.room.label).font(.largeTitle.bold())
@@ -561,18 +603,35 @@ struct DestinationJourneyView: View {
                 DisclosureGroup("Preview indoor path") { TraceView(samples: target.draft.samples, landmarks: [target.route.entrance, target.route.room]) }
                 Text("Inside, the camera matches your saved 3D map and guides you from wherever you are on the path.").font(.footnote).foregroundStyle(highContrast ? Color.primary : Color.secondary)
             }
+        }
+        }
         }.navigationTitle("Your destination").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
-            .fullScreenCover(isPresented: $camera) { HallwayLaunchView(route: target.route, draft: target.draft, library: target.library, settings: settings) }
-            .navigationDestination(isPresented: $outdoor) {
+            .fullScreenCover(isPresented: $camera, onDismiss: finishAutomaticJourney) { HallwayLaunchView(route: target.route, draft: target.draft, library: target.library, settings: settings) }
+            .fullScreenCover(isPresented: $outdoor, onDismiss: finishAutomaticJourney) {
                 if let entrance {
                     let item = MKMapItem(placemark: MKPlacemark(coordinate: CLLocationCoordinate2D(latitude: entrance.latitude, longitude: entrance.longitude)))
-                    OutdoorRouteView(destination: named(item), settings: settings, indoor: target, automaticallyStart: true)
+                    NavigationStack { OutdoorRouteView(destination: named(item), settings: settings, indoor: target, automaticallyStart: true) }
                 }
             }
-            .onAppear { if entrance != nil { here.start() } }
+            .task {
+                if entrance != nil { here.start() }
+                guard automaticallyStart, !automaticLaunchConsumed, !camera, !outdoor else { return }
+                automaticLaunchConsumed = true
+                // Give a fresh GPS fix a short opportunity to choose the outdoor
+                // leg. If unavailable, camera matching still cannot assert a pose.
+                if entrance != nil {
+                    for _ in 0..<30 {
+                        if let fix = here.location, fix.horizontalAccuracy <= 30, abs(fix.timestamp.timeIntervalSinceNow) <= 5 { break }
+                        do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                startNavigation()
+            }
             .onDisappear { here.stop() }
     }
+    private func finishAutomaticJourney() { if automaticallyStart { dismiss() } }
     private func named(_ item: MKMapItem) -> MKMapItem { item.name = target.draft.name; return item }
 }
 

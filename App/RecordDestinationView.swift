@@ -76,10 +76,12 @@ struct RecordDestinationView: View {
                 .navigationTitle("Destination").navigationBarTitleDisplayMode(.inline)
                 .swipeLeftToGoBack { dismiss() }
                 .toolbar { Button("Close") { dismiss() } }
-                .navigationDestination(isPresented: $directions) {
-                    if let destination = resolvedBuilding {
-                        OutdoorRouteView(destination: destination, settings: settings, automaticallyStart: true, initialRoom: request.room)
-                    } else { NativeDestinationSearchView(query: request.building, settings: settings) }
+                .fullScreenCover(isPresented: $directions) {
+                    NavigationStack {
+                        if let destination = resolvedBuilding {
+                            OutdoorRouteView(destination: destination, settings: settings, automaticallyStart: true, initialRoom: request.room)
+                        } else { NativeDestinationSearchView(query: request.building, settings: settings) }
+                    }
                 }
                 .navigationDestination(isPresented: $record) { RememberRouteView(settings: settings, requestedRoom: request, onFinished: { dismiss() }) }
                 .overlay { VoiceEdgeGlow(active: voice.listening) }

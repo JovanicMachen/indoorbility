@@ -1,12 +1,15 @@
 """Operator-enrolled devices; secrets are hashed at rest, access JWTs last 15 minutes."""
 from contextlib import contextmanager
 import hashlib
+import hmac
+import json
 import os
 from pathlib import Path
 import secrets
 import sqlite3
 import time
 import jwt
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,6 +24,8 @@ def connect():
         CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY, revoked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS pairing(hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS refresh(hash TEXT PRIMARY KEY, device TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS refresh_retry(old_hash TEXT PRIMARY KEY, request_hash TEXT NOT NULL,
+            successor_hash TEXT NOT NULL, response BLOB);
     ''')
     os.chmod(path, 0o600)
     try:
@@ -52,7 +57,34 @@ def revoke(device):
         db.execute('UPDATE devices SET revoked=1 WHERE id=?', (device,))
 
 
-def credentials(db, device, expiry):
+# No fixed absolute expiry for enrolled, non-revoked devices. Device revocation
+# remains authoritative, including for access tokens already issued.
+DURABLE_EXPIRY = 2**62
+
+
+def retry_cipher():
+    secret = os.getenv('AGENT_AUTH_SECRET', '')
+    if len(secret) < 32: raise HTTPException(503, 'Authentication unavailable')
+    key = hmac.new(secret.encode(), b'indoorbility-refresh-retry-v1', hashlib.sha256).digest()
+    return AESGCM(key)
+
+
+def seal_response(value, old_hash, request_hash):
+    nonce = secrets.token_bytes(12)
+    aad = (old_hash + ':' + request_hash).encode()
+    return nonce + retry_cipher().encrypt(nonce, json.dumps(value, separators=(',', ':')).encode(), aad)
+
+
+def open_response(value, old_hash, request_hash):
+    aad = (old_hash + ':' + request_hash).encode()
+    try:
+        return json.loads(retry_cipher().decrypt(value[:12], value[12:], aad))
+    except Exception:
+        # Never return secrets or revoke a device on an unreadable recovery record.
+        raise HTTPException(503, 'Renewal recovery unavailable')
+
+
+def credentials(db, device, expiry=DURABLE_EXPIRY):
     now = int(time.time())
     secret = os.getenv('AGENT_AUTH_SECRET', '')
     if len(secret) < 32: raise HTTPException(503, 'Authentication unavailable')
@@ -68,6 +100,11 @@ class Credential(BaseModel):
     credential: str = Field(min_length=20, max_length=256)
 
 
+class RefreshCredential(Credential):
+    # A random per-rotation secret, retained on the phone until the response is saved.
+    requestId: str | None = Field(default=None, min_length=32, max_length=128, pattern=r'^[A-Za-z0-9_-]+$')
+
+
 def install(app):
     @app.post('/auth/pair')
     def pair(body: Credential):
@@ -79,22 +116,36 @@ def install(app):
             db.execute('DELETE FROM pairing WHERE hash=?', (digest(body.credential),))
             device = secrets.token_urlsafe(24)
             db.execute('INSERT INTO devices(id) VALUES (?)', (device,))
-            return credentials(db, device, now+30*86400)
+            return credentials(db, device)
 
     @app.post('/auth/refresh')
-    def refresh(body: Credential):
+    def refresh(body: RefreshCredential):
         now = int(time.time())
+        old_hash = digest(body.credential)
+        request_hash = digest(body.requestId) if body.requestId else None
         with connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT r.device,r.expires,r.used,d.revoked FROM refresh r JOIN devices d ON d.id=r.device WHERE hash=?', (digest(body.credential),)).fetchone()
-            if not row or row[1] <= now or row[3]: raise HTTPException(401, 'Pair this phone again')
+            row = db.execute('SELECT r.device,r.expires,r.used,d.revoked FROM refresh r JOIN devices d ON d.id=r.device WHERE hash=?', (old_hash,)).fetchone()
+            if not row or row[3]: raise HTTPException(401, 'Device authorization unavailable')
             if row[2]:
+                retry = db.execute('SELECT request_hash,response FROM refresh_retry WHERE old_hash=?', (old_hash,)).fetchone()
+                if retry and request_hash and hmac.compare_digest(retry[0], request_hash):
+                    if retry[1] is None: raise HTTPException(409, 'Renewal already completed')
+                    return open_response(retry[1], old_hash, request_hash)
                 db.execute('UPDATE devices SET revoked=1 WHERE id=?', (row[0],))
-                db.commit()  # replay revocation must survive the error response
-                raise HTTPException(401, 'Pair this phone again')
-            db.execute('UPDATE refresh SET used=1 WHERE hash=?', (digest(body.credential),))
-            db.execute('DELETE FROM refresh WHERE expires < ?', (now,))
-            return credentials(db, row[0], row[1])
+                db.commit()
+                raise HTTPException(401, 'Device authorization unavailable')
+            # A legacy unexpired credential migrates in place, preserving device ID.
+            if row[1] <= now: raise HTTPException(401, 'Device authorization unavailable')
+            db.execute('UPDATE refresh SET used=1 WHERE hash=?', (old_hash,))
+            # Once the successor is used, recovery of its predecessor must not
+            # roll a client back to an already-consumed credential.
+            db.execute('UPDATE refresh_retry SET response=NULL WHERE successor_hash=?', (old_hash,))
+            result = credentials(db, row[0])
+            if request_hash:
+                db.execute('INSERT INTO refresh_retry(old_hash,request_hash,successor_hash,response) VALUES (?,?,?,?)',
+                    (old_hash, request_hash, digest(result['refreshToken']), seal_response(result, old_hash, request_hash)))
+            return result
 
 
 if __name__ == '__main__':

@@ -42,6 +42,119 @@ class DeviceAuthTests(unittest.TestCase):
         self.assertEqual(self.client.post('/auth/refresh', json={'credential': first['refreshToken']}).status_code, 401)
         self.assertEqual(self.client.get('/agent/check', headers=headers).status_code, 401)
 
+    def test_interrupted_refresh_retries_same_request_across_backend_restart(self):
+        first = self.pair()
+        request = {'credential': first['refreshToken'], 'requestId': 'a' * 64}
+        # The response was committed but lost in transit; a new backend instance retries.
+        issued = self.client.post('/auth/refresh', json=request)
+        self.assertEqual(issued.status_code, 200)
+        retry = TestClient(app.app).post('/auth/refresh', json=request)
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.json(), issued.json())
+        self.assertEqual(retry.json()['deviceId'], first['deviceId'])
+        with device_auth.connect() as db:
+            record = db.execute('SELECT response FROM refresh_retry').fetchone()[0]
+            self.assertNotIn(issued.json()['refreshToken'].encode(), record)
+        self.assertTrue(device_auth.active(first['deviceId']))
+        # After the next rotation, an old retry must not roll back the phone.
+        successor = self.client.post('/auth/refresh', json={'credential': issued.json()['refreshToken'], 'requestId': 'b' * 64})
+        self.assertEqual(successor.status_code, 200)
+        self.assertEqual(self.client.post('/auth/refresh', json=request).status_code, 409)
+        self.assertTrue(device_auth.active(first['deviceId']))
+
+    def test_different_retry_id_is_replay_and_revokes(self):
+        first = self.pair()
+        self.assertEqual(self.client.post('/auth/refresh', json={'credential': first['refreshToken'], 'requestId':'a'*64}).status_code, 200)
+        self.assertEqual(self.client.post('/auth/refresh', json={'credential': first['refreshToken'], 'requestId':'b'*64}).status_code, 401)
+        self.assertFalse(device_auth.active(first['deviceId']))
+
+    def test_existing_unexpired_device_migrates_without_changing_id(self):
+        first = self.pair()
+        # Simulate an existing 30-day credential created by the deployed version.
+        with device_auth.connect() as db:
+            db.execute('UPDATE refresh SET expires=? WHERE hash=?', (int(time.time())+100, device_auth.digest(first['refreshToken'])))
+        second = self.client.post('/auth/refresh', json={'credential':first['refreshToken'], 'requestId':'c'*64})
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json()['deviceId'], first['deviceId'])
+        with device_auth.connect() as db:
+            expiry = db.execute('SELECT expires FROM refresh WHERE hash=?', (device_auth.digest(second.json()['refreshToken']),)).fetchone()[0]
+        self.assertEqual(expiry, device_auth.DURABLE_EXPIRY)
+
+    def test_renewal_remains_valid_after_thirty_days_and_backend_restart(self):
+        first = self.pair()
+        future = time.time() + 45 * 86400
+        with patch('device_auth.time.time', return_value=future):
+            second = TestClient(app.app).post('/auth/refresh', json={'credential':first['refreshToken'], 'requestId':'f'*64})
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(second.json()['deviceId'], first['deviceId'])
+            third = TestClient(app.app).post('/auth/refresh', json={'credential':second.json()['refreshToken'], 'requestId':'g'*64})
+            self.assertEqual(third.status_code, 200)
+            self.assertEqual(third.json()['deviceId'], first['deviceId'])
+
+    def test_identical_concurrent_retry_is_idempotent(self):
+        from concurrent.futures import ThreadPoolExecutor
+        first = self.pair()
+        payload = {'credential':first['refreshToken'], 'requestId':'h'*64}
+        def rotate(_):
+            result = TestClient(app.app).post('/auth/refresh', json=payload)
+            return result.status_code, result.json()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(rotate, range(2)))
+        self.assertEqual(results[0][0], 200)
+        self.assertEqual(results[0], results[1])
+        self.assertTrue(device_auth.active(first['deviceId']))
+
+    def test_real_backend_restart_and_temporary_network_loss(self):
+        import httpx, socket, subprocess, sys
+        from pathlib import Path
+        with socket.socket() as sock:
+            sock.bind(('127.0.0.1', 0))
+            port = sock.getsockname()[1]
+        base = f'http://127.0.0.1:{port}'
+        client = httpx.Client(trust_env=False, timeout=1)
+        self.addCleanup(client.close)
+        process = None
+        def stop():
+            nonlocal process
+            if process and process.poll() is None:
+                process.terminate()
+                try: process.wait(timeout=5)
+                except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=5)
+            process = None
+        self.addCleanup(stop)
+        def start():
+            nonlocal process
+            process = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', str(port), '--no-access-log'],
+                cwd=str(Path(__file__).parent), env=os.environ.copy(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _ in range(100):
+                if process.poll() is not None: self.fail('Backend process exited during startup')
+                try:
+                    if client.get(base+'/health').status_code == 200: return
+                except httpx.TransportError: pass
+                time.sleep(0.05)
+            self.fail('Backend did not start')
+        start()
+        first = client.post(base+'/auth/pair', json={'credential':device_auth.issue_pairing()}).json()
+        payload = {'credential':first['refreshToken'], 'requestId':'i'*64}
+        committed = client.post(base+'/auth/refresh', json=payload).json()
+        stop()
+        with self.assertRaises(httpx.TransportError): client.post(base+'/auth/refresh', json=payload)
+        start()
+        retry = client.post(base+'/auth/refresh', json=payload)
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.json(), committed)
+        self.assertEqual(committed['deviceId'], first['deviceId'])
+        self.assertEqual(client.get(base+'/agent/check', headers={'Authorization':'Bearer '+committed['accessToken']}).status_code, 200)
+
+    def test_revocation_blocks_recovery_and_future_refresh(self):
+        first = self.pair()
+        request = {'credential':first['refreshToken'], 'requestId':'d'*64}
+        second = self.client.post('/auth/refresh', json=request).json()
+        device_auth.revoke(first['deviceId'])
+        self.assertEqual(self.client.post('/auth/refresh', json=request).status_code, 401)
+        self.assertEqual(self.client.post('/auth/refresh', json={'credential':second['refreshToken'], 'requestId':'e'*64}).status_code, 401)
+        self.assertEqual(self.client.get('/agent/check', headers={'Authorization':'Bearer '+second['accessToken']}).status_code, 401)
+
     def test_restart_persistence_and_revoke(self):
         first = self.pair()
         app.runs.clear()  # ephemeral AI turns do not affect durable device identity

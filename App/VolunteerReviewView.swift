@@ -8,6 +8,16 @@ private enum ScanPreviewStyle {
 }
 
 extension ScanLibrary {
+    /// Saves local availability after structural checks, without a second setup form.
+    func publishRecording(_ route: HallwayRoute, draft: ScanDraft) throws {
+        guard let current = try hallway(draft), current == route else {
+            throw MapError.invalid("Route changed. Reopen this scan.")
+        }
+        let publication = try RoutePublication(route: current, draft: draft)
+        try JSONEncoder().encode(publication).write(to: directory(draft.id).appending(path: "route-publication.json"), options: .atomic)
+        try JourneyLibrary().remember(current, building: draft.name)
+        objectWillChange.send()
+    }
     func requiresVolunteerReview(_ id: UUID) -> Bool {
         FileManager.default.fileExists(atPath: directory(id).appending(path: "volunteer-draft.json").path)
     }
@@ -99,13 +109,7 @@ struct VolunteerReviewView: View {
     }
     private func publish() {
         do {
-            guard let current = try library.hallway(draft), current == route else {
-                throw MapError.invalid("Route changed. Reopen this scan.")
-            }
-            let publication = try RoutePublication(route: current, draft: draft)
-            try JSONEncoder().encode(publication).write(to: library.directory(draft.id).appending(path: "route-publication.json"), options: .atomic)
-            try JourneyLibrary().remember(current, building: draft.name)
-            library.objectWillChange.send()
+            try library.publishRecording(route, draft: draft)
             saved = true; error = nil
             settings.speak("Route published.")
         } catch { self.error = error.localizedDescription }

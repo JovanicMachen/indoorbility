@@ -1,5 +1,27 @@
 import Foundation
 
+/// Requires sustained AR world-map relocalization before automatically placing
+/// a user on a saved route. GPS proximity and OCR alone cannot satisfy this.
+public struct SavedRouteRelocalization {
+    private var stableSince: TimeInterval?
+    private var previousTime: TimeInterval?
+    private var previousPosition: SpatialPoint?
+    public init() {}
+    public mutating func reset() { stableSince = nil; previousTime = nil; previousPosition = nil }
+    public mutating func update(mapMatched: Bool, trackingStable: Bool, position: SpatialPoint?, time: TimeInterval) -> Bool {
+        guard mapMatched, trackingStable, let position, position.isFinite, time.isFinite else { reset(); return false }
+        if let previousTime, let previousPosition {
+            let dt = time-previousTime
+            if dt <= 0 || dt > 0.8 || position.distance(to: previousPosition) > max(0.6, Float(dt)*2.5) {
+                reset()
+            }
+        }
+        previousTime = time; previousPosition = position
+        if stableSince == nil { stableSince = time }
+        return time-(stableSince ?? time) >= 2
+    }
+}
+
 public struct JourneyDestination: Codable, Equatable, Identifiable {
     public let id: UUID
     public let routeID: UUID

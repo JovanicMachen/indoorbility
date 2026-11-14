@@ -48,11 +48,13 @@ One Railway service, one worker, one replica, persistent volume at `/data`, serv
 
 ## Pair a phone without keeping the Mac on
 
-In a Railway **remote service shell** run `python device_auth.py`. This prints a high-entropy, one-use pairing code valid for ten minutes. This is an operator command, not a public issuance API. Keep it out of shared logs. In iPhone Settings → AI connection, enter the hosted HTTPS URL and pairing code, then tap **Pair this iPhone** and **Check backend connection**.
+In a Railway **remote service shell** run `python device_auth.py`. This prints a high-entropy, one-use pairing code valid for ten minutes. This is an operator command, not a public issuance API. Keep it out of shared logs. For operator enrollment, open Settings → AI connection, enable **Show agent timeline**, expand **Advanced connection**, and enter the hosted HTTPS URL and pairing code. Tap **Pair this iPhone**; then turn developer mode off. Ordinary users see the connection status.
 
-The phone receives a 15-minute access token and rotating renewal credential in device-only Keychain storage, scoped to that backend URL. Renewal lasts up to 30 days from pairing, then requires pairing again. No OpenAI key or signing secret is sent to the phone. Replaying an already-used renewal credential revokes that device; a lost renewal response can therefore require re-pairing. Revoke an enrolled phone remotely with `python device_auth.py --revoke DEVICE_ID`. Server-secret rotation invalidates access tokens; use device revocation too when renewal credentials must be invalidated.
+The phone stores 15-minute access tokens and rotating refresh credentials in device-only Keychain storage, scoped to the backend URL. Active devices have no fixed 30-day absolute expiration. The phone persists a random renewal request identifier before sending; if the response is lost, it retries the same request after a restart or network recovery. The server stores the recovery response encrypted on the durable volume. Reusing a consumed credential with a different request identifier revokes the device. Revoke a phone with `python device_auth.py --revoke DEVICE_ID`. Revocation also invalidates existing access tokens.
 
-Operator enrollment is suitable for the existing private/test app. It is not public account signup or Apple App Attest. A public release needs an enrollment/identity policy. Legacy operator-issued JWTs are rejected in production.
+Existing paired phones retain their device ID and map ownership when an **unexpired, unused** legacy refresh credential is renewed against the updated backend. Already-expired, consumed, or revoked credentials cannot be silently restored. Deploy the backward-compatible backend before installing the updated app: the old backend rejects the new retry field. Preserve the existing volume and `AGENT_AUTH_SECRET`; changing that secret can make a pending encrypted renewal response unrecoverable. A backup of `/data` is required before any migration. Do not delete or replace the database.
+
+Operator enrollment remains necessary until account sign-in is implemented. The future account-based path is described in [ACCOUNT_AUTH_PLAN.md](ACCOUNT_AUTH_PLAN.md); it is not an active public signup endpoint.
 
 ## Persistence audit
 

@@ -33,6 +33,23 @@ final class IndoorbilityUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
     }
 
+    func testLeftSwipeOverSearchResultReturnsHome() throws {
+        app.tabBars.buttons["Home"].tap()
+        let field = app.textFields["destinationSearch"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap(); field.typeText("Friend Center 008")
+        app.staticTexts["destinationPrompt"].tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        let result = app.buttons.containing(.staticText, identifier: "Room 008 · Friend Center").firstMatch
+        XCTAssertTrue(result.waitForExistence(timeout: 5))
+        result.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5))
+            .press(forDuration: 0.1, thenDragTo: result.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.5)))
+        XCTAssertEqual(field.value as? String, "Search destinations")
+        XCTAssertFalse(app.buttons["closeDestinationSearch"].exists)
+        field.tap(); field.typeText("Friend Center 006")
+        XCTAssertTrue(app.buttons.containing(.staticText, identifier: "Room 006 · Friend Center").firstMatch.waitForExistence(timeout: 5))
+    }
+
     func testCloseSearchClearsQueryAndCanSearchAgain() throws {
         app.tabBars.buttons["Home"].tap()
         let field = app.textFields["destinationSearch"]
@@ -42,6 +59,7 @@ final class IndoorbilityUITests: XCTestCase {
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
         XCTAssertEqual(field.value as? String, "Search destinations")
         XCTAssertFalse(app.buttons["closeDestinationSearch"].exists)
+        capture("home-middle-voice-controls")
         field.tap(); field.typeText("Friend Center 008")
         XCTAssertTrue(app.buttons.containing(.staticText, identifier: "Room 008 · Friend Center").firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(field.value as? String, "Friend Center 008")
@@ -60,8 +78,16 @@ final class IndoorbilityUITests: XCTestCase {
         testLink.tap()
         app.buttons["Start Test"].tap()
         XCTAssertEqual(app.staticTexts["testGuidanceInstruction"].label, "Continue straight for 100 meters.")
+        let loop = app.staticTexts["testJourneyLoopState"]
+        XCTAssertTrue(NSPredicate(format: "label == %@", "Travel loop: Playing").evaluate(with: loop) ||
+            XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Travel loop: Playing"), object: loop)], timeout: 5) == .completed)
+        app.buttons["Simulate tracking loss"].tap()
+        XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Travel loop: Stopped"), object: loop)], timeout: 5) == .completed)
+        app.buttons["Recover at simulated landmark"].tap()
+        XCTAssertTrue(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Travel loop: Playing"), object: loop)], timeout: 5) == .completed)
         for _ in 0..<8 { app.buttons["Advance position"].tap() }
         XCTAssertEqual(app.staticTexts["testGuidanceInstruction"].label, "Continue straight. In 20 meters, turn left.")
+        XCTAssertEqual(loop.label, "Travel loop: Playing")
         let mute = app.switches["Mute all app sound"]
         reveal(mute)
         if mute.value as? String != "1" { mute.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap() }
@@ -86,6 +112,82 @@ final class IndoorbilityUITests: XCTestCase {
         XCTAssertFalse(app.textFields["Floor label (confirm from building signage)"].isHittable)
         XCTAssertFalse(app.buttons["Start recording"].isEnabled) // Simulator cannot record LiDAR.
     }
+    func testSavedRoomButtonOpensRegularGuidanceWithoutEndpointSetup() throws {
+        app.terminate(); app.launchArguments = ["--saved-room-ui-test"]; app.launch()
+        defer {
+            app.terminate(); app.launchArguments = []; app.launch()
+            app.tabBars.buttons["Routes"].tap() // Remove only the marked simulator fixture.
+        }
+        app.tabBars.buttons["Routes"].tap()
+        let room = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "savedRoom-")).firstMatch
+        XCTAssertTrue(room.waitForExistence(timeout: 5))
+        XCTAssertEqual(room.label, "Room 005, SIMULATED UI Test Building")
+        XCTAssertTrue(app.staticTexts["SIMULATED UI Test Building"].firstMatch.exists)
+        room.tap()
+        XCTAssertTrue(app.buttons["End navigation"].waitForExistence(timeout: 10))
+        // The fixture has no world map and the simulator cannot provide ARKit.
+        // Dismiss that expected hardware message; this test checks screen flow only.
+        if app.alerts["Check your position"].waitForExistence(timeout: 2) {
+            app.alerts["Check your position"].buttons["OK"].tap()
+        }
+        XCTAssertTrue(app.buttons["holdToTalk"].isHittable)
+        XCTAssertTrue(app.buttons["stopIndoorDirections"].isHittable)
+        XCTAssertTrue(app.buttons["repeatCameraGuidance"].isHittable)
+        XCTAssertFalse(app.buttons["matchSavedIndoorMap"].exists)
+        XCTAssertFalse(app.buttons["toggleNavigationMap"].exists)
+        // The recorded route is visible immediately, even without a successful
+        // sensor match. Never leave an empty screen while matching.
+        let savedMap = app.descendants(matching: .any)["indoorSavedRouteMap"].firstMatch
+        XCTAssertTrue(savedMap.waitForExistence(timeout: 5))
+        XCTAssertTrue((savedMap.value as? String)?.contains("route trace") == true)
+        XCTAssertTrue((savedMap.value as? String)?.contains("recorded direction arrows") == true)
+        XCTAssertTrue(app.staticTexts["recordedRoutePreview"].exists)
+        XCTAssertTrue(app.staticTexts["liveInstruction"].label.contains("Straight for"))
+        XCTAssertTrue(app.staticTexts["liveInstruction"].label.contains("Live position not matched"))
+        XCTAssertTrue(app.staticTexts["Positioning unavailable"].exists)
+        XCTAssertTrue(app.buttons["retryIndoorPositioning"].isHittable)
+        app.buttons["retryIndoorPositioning"].tap()
+        if app.alerts["Check your position"].waitForExistence(timeout: 2) {
+            app.alerts["Check your position"].buttons["OK"].tap()
+        }
+        XCTAssertTrue(savedMap.exists)
+        capture("indoor-immediate-route")
+        XCTAssertTrue((savedMap.value as? String)?.hasPrefix("Position not matched") == true)
+        XCTAssertFalse(app.descendants(matching: .any)["liveDirectionBadge"].firstMatch.exists) // No guessed arrow before a real map match.
+        XCTAssertFalse(app.buttons["indoorRouteRecenter"].isEnabled)
+        savedMap.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.4))
+            .press(forDuration: 0.05, thenDragTo: savedMap.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.4)))
+        XCTAssertTrue(app.buttons["End navigation"].exists) // A map pan must not navigate back.
+        XCTAssertTrue(app.buttons["indoorRouteOverview"].isHittable)
+        app.buttons["indoorRouteOverview"].tap()
+        capture("lidar-map-navigation")
+        XCTAssertFalse(app.buttons["startSavedRoute"].exists)
+        XCTAssertFalse(app.buttons["Confirm first landmark"].exists)
+        app.buttons["Navigation options"].tap()
+        XCTAssertTrue(app.buttons["Map"].exists)
+        XCTAssertTrue(app.buttons["Camera"].exists)
+        for removed in ["Simple guidance", "Repeat directions", "Mute", "Accessibility", "What’s ahead?", "Read a sign", "Recover at a landmark", "Report a closure", "Pause guidance", "Ask someone for help"] {
+            XCTAssertFalse(app.buttons[removed].exists)
+        }
+        app.buttons["Camera"].tap()
+        XCTAssertFalse(app.descendants(matching: .any)["indoorSavedRouteMap"].firstMatch.exists)
+        XCTAssertFalse(app.buttons["showMatchingCamera"].exists)
+        app.buttons["Navigation options"].tap()
+        app.buttons["Map"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["indoorSavedRouteMap"].firstMatch.exists)
+        app.buttons["End navigation"].tap()
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "savedRoom-")).firstMatch.waitForExistence(timeout: 5))
+    }
+
+    func testKnownRoomSearchAcceptsShortNumber() throws {
+        app.tabBars.buttons["Home"].tap()
+        let field = app.textFields["destinationSearch"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap(); field.typeText("Friend Center 6")
+        let room = app.buttons.containing(.staticText, identifier: "Room 006 · Friend Center").firstMatch
+        XCTAssertTrue(room.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Places near you"].exists)
+    }
 
     func testKnownRoomBuildingDirectionsOpensGPSWithoutSearch() throws {
         app.tabBars.buttons["Home"].tap()
@@ -103,8 +205,55 @@ final class IndoorbilityUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Map"].waitForExistence(timeout: 5))
         app.buttons["Map"].tap()
         XCTAssertTrue(app.buttons["Camera"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Recenter"].waitForExistence(timeout: 5))
+        app.buttons["Recenter"].tap()
         app.buttons["Camera"].tap()
         XCTAssertTrue(app.buttons["Map"].waitForExistence(timeout: 5))
+    }
+
+    func testCameraRouteControlsWorkBeforeGPSIsReady() throws {
+        app.tabBars.buttons["Home"].tap()
+        let field = app.textFields["destinationSearch"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap(); field.typeText("Friend 006")
+        app.buttons["Find destination"].tap()
+        XCTAssertTrue(app.buttons["Directions to building"].waitForExistence(timeout: 5))
+        app.buttons["Directions to building"].tap()
+        XCTAssertTrue(app.buttons["End directions"].waitForExistence(timeout: 10))
+
+        let repeatButton = app.buttons["repeatCameraGuidance"]
+        XCTAssertTrue(repeatButton.waitForExistence(timeout: 5))
+        let provider = app.staticTexts["outdoorRoutingProvider"]
+        XCTAssertEqual(provider.value as? String, "Apple walking directions")
+        XCTAssertFalse(app.buttons["continueSavedIndoorRoute"].exists)
+        XCTAssertTrue(repeatButton.isHittable)
+        repeatButton.tap()
+        XCTAssertTrue(app.buttons["holdToTalk"].exists)
+        let readSign = app.buttons["readNavigationSign"]
+        XCTAssertTrue(readSign.isHittable)
+        readSign.tap()
+        XCTAssertTrue(app.staticTexts["navigationSignText"].waitForExistence(timeout: 5))
+
+        app.buttons["Navigation options"].tap()
+        let accessibility = app.buttons["cameraNavigationAccessibility"]
+        XCTAssertTrue(accessibility.waitForExistence(timeout: 5))
+        accessibility.tap()
+        XCTAssertTrue(app.navigationBars["Accessibility"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
+        XCTAssertTrue(app.buttons["Map"].waitForExistence(timeout: 5))
+        app.buttons["Map"].tap()
+        XCTAssertTrue(app.buttons["Camera"].waitForExistence(timeout: 5))
+        app.buttons["Camera"].tap()
+        XCTAssertTrue(app.buttons["readNavigationSign"].waitForExistence(timeout: 5))
+        let standardRoute = app.buttons["standardOutdoorRoute"]
+        XCTAssertTrue(standardRoute.waitForExistence(timeout: 5))
+        standardRoute.tap()
+        XCTAssertTrue(standardRoute.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Step-free route unavailable"].exists)
+        XCTAssertEqual(provider.value as? String, "Apple walking directions")
+        capture("camera-route-controls")
+        app.buttons["End directions"].tap()
+        XCTAssertTrue(app.buttons["Directions to building"].waitForExistence(timeout: 5))
     }
 
     func testKnownRoomOffersPrefilledRecording() throws {
@@ -211,11 +360,12 @@ final class IndoorbilityUITests: XCTestCase {
         reveal(app.buttons["AI connection"])
         app.buttons["AI connection"].tap()
         XCTAssertTrue(app.navigationBars["AI connection"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.secureTextFields["One-time pairing code"].exists)
+        XCTAssertTrue(app.staticTexts["agentConnectionStatus"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.switches["Cloud AI"].exists)
+        XCTAssertFalse(app.secureTextFields["One-time pairing code"].exists)
         capture("17-agent-connection")
-        app.buttons["Privacy & pairing"].tap()
-        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Never enter an OpenAI API key")).firstMatch.exists)
+        app.buttons["Privacy"].tap()
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Camera images")).firstMatch.exists)
     }
     func testShoppingAgentOfflineUsesActualDemoPlanner() throws {
         openSettingsTool("Shopping demonstration")

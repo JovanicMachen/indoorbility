@@ -8,7 +8,8 @@ import IndoorbilityCore
     var isSpeaking: Bool { current != nil }
     private let synth = AVSpeechSynthesizer()
     private var queue = NavigationSpeechQueue()
-    private var current: PendingSpeech?
+    var onSpeakingChanged: (() -> Void)?
+    private var current: PendingSpeech? { didSet { onSpeakingChanged?() } }
     private var utterance: AVSpeechUtterance?
     override init() {
         super.init(); synth.usesApplicationAudioSession = false; synth.delegate = self
@@ -75,54 +76,92 @@ import IndoorbilityCore
     }
 }
 
-/// User-supplied travel tick plus synthesized directional cues.
-@MainActor final class NavigationAudioCoordinator: NSObject {
-    private var player: AVAudioPlayer?
-    private var journeyPlayer: AVAudioPlayer?
-    private var interrupted = false
-    override init() {
-        super.init()
-        NotificationCenter.default.addObserver(self, selector: #selector(audioInterrupted(_:)), name: AVAudioSession.interruptionNotification, object: nil)
+/// Session configuration and AVAudioPlayer I/O share one non-main executor.
+/// No player or mutable SDK object crosses this actor's boundary.
+actor AppAudioWorker {
+    static let shared = AppAudioWorker()
+    private final class Streams {
+        var cue: AVAudioPlayer?
+        var loop: AVAudioPlayer?
+        var ducked = false
     }
-    @objc private func audioInterrupted(_ notification: Notification) {
-        guard let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-              let type = AVAudioSession.InterruptionType(rawValue: value) else { return }
-        interrupted = type == .began
-        if interrupted { stop() }
+    private var clients: [UUID: Streams] = [:]
+    private var waveCache: [String: Data] = [:]
+    private var voiceLease: UUID?
+    private var navigationActive = false
+    private func streams(_ id: UUID) -> Streams {
+        if let value = clients[id] { return value }
+        let value = Streams(); clients[id] = value; return value
     }
-    func setJourneyLoop(active: Bool) {
-        guard active, !interrupted else { journeyPlayer?.pause(); return }
-        guard journeyPlayer?.isPlaying != true else { return }
+    func activateNavigation() throws -> Bool {
+        assert(!Thread.isMainThread)
+        guard voiceLease == nil else { return false }
+        if !navigationActive {
+            let audio = AVAudioSession.sharedInstance()
+            try audio.setCategory(.playAndRecord, mode: .default,
+                options: [.defaultToSpeaker, .mixWithOthers, .allowBluetoothHFP])
+            try audio.setActive(true)
+            navigationActive = true
+        }
+        return true
+    }
+    func beginRecording(lease: UUID) throws {
+        assert(!Thread.isMainThread)
+        for value in clients.values { value.cue?.stop(); value.loop?.pause() }
+        navigationActive = false; voiceLease = lease
         do {
-            if journeyPlayer == nil {
-                guard let url = Bundle.main.url(forResource: "JourneyLoop", withExtension: "mp3") else { return }
-                journeyPlayer = try AVAudioPlayer(contentsOf: url)
-                journeyPlayer?.numberOfLoops = -1
-                journeyPlayer?.prepareToPlay()
-            }
-            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .mixWithOthers, .allowBluetooth])
-            try AVAudioSession.sharedInstance().setActive(true)
-            journeyPlayer?.volume = 0
-            journeyPlayer?.play()
-            journeyPlayer?.setVolume(0.08, fadeDuration: 0.4)
-        } catch { lastCue = "Playback unavailable" }
+            let audio = AVAudioSession.sharedInstance()
+            try audio.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
+            try audio.setActive(true)
+        } catch { if voiceLease == lease { voiceLease = nil }; throw error }
     }
-    private(set) var lastCue = "None"
-    func travelTick() {
-        guard player?.isPlaying != true,
-              let url = Bundle.main.url(forResource: "TravelTick", withExtension: "mp3") else { return }
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .mixWithOthers, .allowBluetooth])
-            try AVAudioSession.sharedInstance().setActive(true)
-            player = try AVAudioPlayer(contentsOf: url)
-            player?.volume = 0.12
-            player?.numberOfLoops = 0
-            player?.play()
-        } catch { lastCue = "Playback unavailable" }
+    func endRecording(lease: UUID) {
+        guard voiceLease == lease else { return } // An old request cannot deactivate a new recording.
+        voiceLease = nil; navigationActive = false
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
-    func stop() { player?.stop(); journeyPlayer?.stop() }
-    func play(_ cue: GuidanceCue) {
-        stop()
+    func interrupted() {
+        navigationActive = false; voiceLease = nil
+        for value in clients.values { value.cue?.stop(); value.loop?.stop() }
+    }
+    func remove(_ id: UUID) {
+        clients[id]?.cue?.stop(); clients[id]?.loop?.stop(); clients[id] = nil
+    }
+    func stopCue(_ id: UUID, gate: AudioRequestGate, token: UUID) {
+        guard gate.contains(token) else { return }; clients[id]?.cue?.stop()
+    }
+    func loop(_ id: UUID, active: Bool, ducked: Bool, gate: AudioRequestGate, token: UUID) throws -> Bool {
+        guard gate.contains(token) else { return false }
+        let value = streams(id)
+        guard active else { value.loop?.pause(); return false }
+        guard voiceLease == nil else { return false }
+        let volume: Float = ducked ? 0.04 : 0.28
+        if value.loop?.isPlaying == true {
+            if value.ducked != ducked { value.loop?.setVolume(volume, fadeDuration: 0.2) }
+            value.ducked = ducked; return true
+        }
+        if value.loop == nil {
+            guard let url = Bundle.main.url(forResource: "JourneyLoop", withExtension: "mp3") else { return false }
+            value.loop = try AVAudioPlayer(contentsOf: url)
+            value.loop?.numberOfLoops = -1; value.loop?.prepareToPlay()
+        }
+        guard try activateNavigation(), gate.contains(token) else { return false }
+        value.loop?.volume = 0
+        guard value.loop?.play() == true else { return false }
+        value.ducked = ducked; value.loop?.setVolume(volume, fadeDuration: 0.2)
+        return true
+    }
+    func cue(_ cue: GuidanceCue, id: UUID, gate: AudioRequestGate, token: UUID) throws -> Bool {
+        guard gate.contains(token), voiceLease == nil else { return false }
+        let value = streams(id); value.cue?.stop()
+        let data = waveCache[cue.rawValue] ?? makeWave(cue)
+        waveCache[cue.rawValue] = data
+        guard try activateNavigation(), gate.contains(token) else { return false }
+        value.cue = try AVAudioPlayer(data: data); value.cue?.volume = 0.45
+        guard gate.contains(token) else { return false }
+        return value.cue?.play() == true
+    }
+    private func makeWave(_ cue: GuidanceCue) -> Data {
         let frequencies: [Double]
         switch cue {
         case .started: frequencies = [440, 550]
@@ -147,12 +186,77 @@ import IndoorbilityCore
         func number<T: FixedWidthInteger>(_ value: T) { var v = value.littleEndian; withUnsafeBytes(of: &v) { data.append(contentsOf: $0) } }
         bytes("RIFF"); number(UInt32(36 + samples.count*2)); bytes("WAVEfmt "); number(UInt32(16)); number(UInt16(1)); number(UInt16(1)); number(UInt32(sampleRate)); number(UInt32(sampleRate*2)); number(UInt16(2)); number(UInt16(16)); bytes("data"); number(UInt32(samples.count*2))
         for sample in samples { number(sample) }
-        do {
-            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .mixWithOthers, .allowBluetooth])
-            try AVAudioSession.sharedInstance().setActive(true)
-            player = try AVAudioPlayer(data: data); player?.volume = 0.45
-            if player?.play() == true { lastCue = cue.rawValue }
-        } catch { lastCue = "Playback unavailable" }
+        return data
+    }
+}
+
+/// UI state only. Blocking audio configuration, decoding and playback live above.
+@MainActor final class NavigationAudioCoordinator: NSObject {
+    private let id = UUID()
+    private let cueGate = AudioRequestGate()
+    private let loopGate = AudioRequestGate()
+    private var interrupted = false
+    private var loopRequested = false
+    private var loopDucked = false
+    private(set) var journeyLoopPlaying = false
+    private(set) var lastCue = "None"
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(audioInterrupted(_:)), name: AVAudioSession.interruptionNotification, object: nil)
+    }
+    deinit {
+        cueGate.renew(); loopGate.renew()
+        let id = id
+        Task { await AppAudioWorker.shared.remove(id) }
+    }
+    @objc nonisolated private func audioInterrupted(_ notification: Notification) {
+        guard let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: value) else { return }
+        let began = type == .began
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.interrupted = began
+            if began { self.stop(); await AppAudioWorker.shared.interrupted() }
+        }
+    }
+    func setJourneyLoop(active: Bool, ducked: Bool = false) {
+        let allowed = active && !interrupted
+        guard allowed != loopRequested || (allowed && ducked != loopDucked) else { return }
+        loopRequested = allowed; loopDucked = ducked
+        let token = loopGate.renew(), id = id, gate = loopGate
+        if !allowed { journeyLoopPlaying = false }
+        Task { [weak self] in
+            do {
+                let played = try await AppAudioWorker.shared.loop(id, active: allowed, ducked: ducked, gate: gate, token: token)
+                guard let self, gate.contains(token) else { return }
+                self.journeyLoopPlaying = played
+                if allowed && !played { self.loopRequested = false }
+            } catch {
+                guard let self, gate.contains(token) else { return }
+                self.journeyLoopPlaying = false; self.loopRequested = false; self.lastCue = "Playback unavailable"
+            }
+        }
+    }
+    func stop() {
+        stopCue(); loopRequested = false; journeyLoopPlaying = false
+        let token = loopGate.renew(), id = id, gate = loopGate
+        Task { _ = try? await AppAudioWorker.shared.loop(id, active: false, ducked: false, gate: gate, token: token) }
+    }
+    func stopCue() {
+        let token = cueGate.renew(), id = id, gate = cueGate
+        Task { await AppAudioWorker.shared.stopCue(id, gate: gate, token: token) }
+    }
+    func play(_ cue: GuidanceCue) {
+        let token = cueGate.renew(), id = id, gate = cueGate
+        Task { [weak self] in
+            do {
+                let played = try await AppAudioWorker.shared.cue(cue, id: id, gate: gate, token: token)
+                guard let self, gate.contains(token) else { return }
+                if played { self.lastCue = cue.rawValue }
+            } catch {
+                guard let self, gate.contains(token) else { return }; self.lastCue = "Playback unavailable"
+            }
+        }
     }
 }
 
@@ -203,28 +307,41 @@ struct NavigationSoundSettings: View {
     private let environment = AVAudioEnvironmentNode()
     private let node = AVAudioPlayerNode()
     private var configured = false
-    func stop() { node.stop(); engine.pause() }
+    private var generation = 0
+    private var pending: Task<Void, Never>?
+    func stop() { generation += 1; pending?.cancel(); pending = nil; node.stop(); engine.pause() }
     func ping(_ vector: SIMD3<Float>) {
         guard vector.x.isFinite, vector.y.isFinite, vector.z.isFinite,
               AVAudioSession.sharedInstance().currentRoute.outputs.contains(where: { [.headphones, .bluetoothA2DP, .bluetoothLE, .bluetoothHFP].contains($0.portType) }) else { stop(); return }
-        do {
-            let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
-            if !configured {
-                engine.attach(environment); engine.attach(node)
-                engine.connect(node, to: environment, format: format)
-                engine.connect(environment, to: engine.mainMixerNode, format: nil)
-                node.renderingAlgorithm = .HRTFHQ; configured = true
-            }
-            try AVAudioSession.sharedInstance().setActive(true)
-            if !engine.isRunning { try engine.start() }
-            let length = max(0.01, simd_length(vector))
-            let p = vector / length * 2
-            node.position = AVAudio3DPoint(x: p.x, y: p.y, z: p.z)
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 6615)!
-            buffer.frameLength = 6615
-            for i in 0..<6615 { buffer.floatChannelData![0][i] = Float(sin(Double(i) * 2 * .pi * 600 / 44100) * sin(.pi * Double(i)/6615) * 0.15) }
-            node.stop(); node.scheduleBuffer(buffer); node.play()
-        } catch { stop() }
+        generation += 1; let token = generation
+        pending?.cancel()
+        pending = Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard try await AppAudioWorker.shared.activateNavigation(), !Task.isCancelled,
+                      self.generation == token else { return }
+                try self.playPing(vector)
+            } catch { if self.generation == token { self.stop() } }
+        }
+    }
+    private func playPing(_ vector: SIMD3<Float>) throws {
+        let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
+        if !configured {
+            engine.attach(environment); engine.attach(node)
+            engine.connect(node, to: environment, format: format)
+            engine.connect(environment, to: engine.mainMixerNode, format: nil)
+            node.renderingAlgorithm = .HRTFHQ; configured = true
+        }
+        if !engine.isRunning { try engine.start() }
+        let length = max(0.01, simd_length(vector))
+        let p = vector / length * 2
+        node.position = AVAudio3DPoint(x: p.x, y: p.y, z: p.z)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 6615)!
+        buffer.frameLength = 6615
+        for i in 0..<6615 { buffer.floatChannelData![0][i] = Float(sin(Double(i) * 2 * .pi * 600 / 44100) * sin(.pi * Double(i)/6615) * 0.15) }
+        // Schedule before play. The async overload waits for completion, so it
+        // cannot be awaited here before starting an otherwise empty player.
+        node.stop(); node.scheduleBuffer(buffer); node.play()
     }
 }
 

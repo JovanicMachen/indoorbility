@@ -1,5 +1,23 @@
 import Foundation
 
+/// Building-scoped room buttons. Identical room labels in different buildings
+/// stay separate; recording/floor selection remains owned by the saved catalog.
+public struct SavedDestinationBuilding: Identifiable {
+    public let id: String
+    public let name: String
+    public let rooms: [JourneyDestination]
+    public static func groups(_ destinations: [JourneyDestination]) -> [Self] {
+        func name(_ value: String) -> String { value.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
+        return Dictionary(grouping: destinations.filter { !name($0.building).isEmpty }, by: { name($0.building).lowercased() })
+            .map { key, rooms in
+                Self(id: key, name: name(rooms[0].building), rooms: rooms.sorted {
+                    let comparison = $0.room.localizedStandardCompare($1.room)
+                    return comparison == .orderedSame ? $0.id.uuidString < $1.id.uuidString : comparison == .orderedAscending
+                })
+            }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+}
+
 /// A single, expiring proposal. A reply cannot activate a replaced or consumed proposal.
 public struct DestinationConfirmation {
     public private(set) var id: UUID?
@@ -23,7 +41,14 @@ public enum DestinationSearch {
         guard !tokens.isEmpty else { return [] }
         return destinations.filter { place in
             let words = (place.room + " " + place.building).lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted)
-            return tokens.allSatisfy { token in words.contains { word in token.allSatisfy(\.isNumber) ? word == token : word.hasPrefix(token) } }
+            return tokens.allSatisfy { token in words.contains { word in
+                if token.allSatisfy(\.isNumber) {
+                    // Treat leading zeros as an alternate spelling, but keep all
+                    // matches if both labels exist so the user can disambiguate.
+                    return word == token || (word.allSatisfy(\.isNumber) && !word.isEmpty && Int(word) != nil && Int(word) == Int(token))
+                }
+                return word.hasPrefix(token)
+            } }
         }
     }
 }

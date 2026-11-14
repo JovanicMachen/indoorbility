@@ -2,6 +2,10 @@
 
 # Indoorbility
 
+**Continuing development:** start with [the current Claude handoff](docs/CLAUDE_HANDOFF.md).
+It records the latest implementation, setup and verified test results; older
+sections below describe earlier milestones and may not reflect current behavior.
+
 Native SwiftUI navigation with remembered indoor destinations, ARKit/LiDAR mapping, Google building discovery, native outdoor maps, accessibility controls, and a local planning assistant. Existing routing, OCR, reports, voice/face controls and demo data remain intact.
 
 ## Fresh checkout

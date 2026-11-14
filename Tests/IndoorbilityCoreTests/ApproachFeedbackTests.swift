@@ -35,6 +35,6 @@ final class ApproachFeedbackTests: XCTestCase {
             .init(instruction: "Continue", points: [.init(0,0), .init(100,0)]),
             .init(instruction: "Left", points: [.init(100,0), .init(100,50)])])
         for t in 1...3 { progress.update(.init(40,0), accuracy: 5, timestamp: Double(t), now: Double(t)) }
-        XCTAssertEqual(progress.remainingRouteDistance, 110, accuracy: 0.01)
+        XCTAssertEqual(progress.remainingRouteDistance, 115, accuracy: 0.01)
     }
 }

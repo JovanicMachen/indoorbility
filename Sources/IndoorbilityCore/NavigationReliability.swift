@@ -17,9 +17,50 @@ public struct TimingWindow {
 
 public enum MapPositionConfidence: String {
     case unverified = "Map position unverified"
-    case savedMap = "Saved map matched; confirm landmark"
-    case confirmed = "Landmark-confirmed position"
+    case savedMap = "Saved map matched"
+    case confirmed = "Position matched to saved map"
     case uncertain = "Position uncertain"
+}
+
+/// Coordinate-frame provenance, separate from momentary camera tracking. With
+/// an initial ARWorldMap, normal tracking establishes the saved frame even if
+/// the intermediate relocalizing callback wasn't delivered to the app.
+public struct SavedWorldMapTracking {
+    private var loadedMap = false
+    private var matchedOnce = false
+    public private(set) var matched = false
+    public var needsInitialMapOnResume: Bool { loadedMap && !matchedOnce }
+    public init() {}
+    public mutating func reset(loadedMap: Bool) {
+        self.loadedMap = loadedMap; matchedOnce = false; matched = false
+    }
+    public mutating func trackingChanged(normal: Bool) {
+        matched = loadedMap && normal
+        if matched { matchedOnce = true }
+    }
+}
+
+/// Recover a brief interruption in an already established saved-map frame.
+/// A new frame, distant pose or prolonged loss requires explicit recovery.
+/// Settling uses elapsed time rather than frame counts, independent of UI rate.
+public struct SavedMapRecovery {
+    private var anchor: SpatialPoint?
+    private var began: TimeInterval?
+    private var settling = SavedRouteRelocalization()
+    public var isPending: Bool { anchor != nil }
+    public init() {}
+    public mutating func reset() { anchor = nil; began = nil; settling.reset() }
+    public mutating func begin(lastPosition: SpatialPoint, time: TimeInterval) {
+        reset()
+        guard lastPosition.isFinite, time.isFinite else { return }
+        anchor = lastPosition; began = time
+    }
+    public mutating func update(mapMatched: Bool, trackingStable: Bool, position: SpatialPoint?, time: TimeInterval) -> Bool {
+        guard let anchor, let began else { return false }
+        guard time.isFinite, time >= began, time-began <= 10 else { reset(); return false }
+        if let position, !position.isFinite || position.distance(to: anchor) > 1.2 { reset(); return false }
+        return settling.update(mapMatched: mapMatched, trackingStable: trackingStable, position: position, time: time)
+    }
 }
 
 /// Sparse measured-surface comparison, never a clearance or localization proof.

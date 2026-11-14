@@ -1,4 +1,4 @@
-"""Generate a dependency-free Xcode project for the native app and local core package."""
+"""Generate the native Xcode project with its local core and pinned Google SDKs."""
 from pathlib import Path
 import hashlib
 import plistlib
@@ -23,11 +23,15 @@ def add(name, value): objects[key(name)] = value; return key(name)
 def quoted(value): return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 def seq(values): return '(' + ', '.join(values) + (',' if values else '') + ')'
 
-files, builds = [], []
+files, builds, asset_builds = [], [], []
 for path in sorted((ROOT/'App').glob('*.swift')):
     ref = add('file:'+path.name, '{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = '+quoted(path.name)+'; sourceTree = "<group>";}')
     files.append(ref)
     builds.append(add('build:'+path.name, '{isa = PBXBuildFile; fileRef = '+ref+';}'))
+for path in sorted((ROOT/'App').glob('*.xcassets')):
+    ref = add('asset:'+path.name, '{isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = '+quoted(path.name)+'; sourceTree = "<group>";}')
+    files.append(ref)
+    asset_builds.append(add('asset-build:'+path.name, '{isa = PBXBuildFile; fileRef = '+ref+';}'))
 app_group = add('app-group', '{isa = PBXGroup; children = '+seq(files)+'; path = App; sourceTree = "<group>";}')
 product = add('product', '{isa = PBXFileReference; explicitFileType = wrapper.application; path = Indoorbility.app; sourceTree = BUILT_PRODUCTS_DIR;}')
 products = add('products', '{isa = PBXGroup; children = '+seq([product])+'; name = Products; sourceTree = "<group>";}')
@@ -35,9 +39,14 @@ main = add('main', '{isa = PBXGroup; children = '+seq([app_group, products])+'; 
 package = add('local-package', '{isa = XCLocalSwiftPackageReference; relativePath = .;}')
 dep = add('package-product', '{isa = XCSwiftPackageProductDependency; package = '+package+'; productName = IndoorbilityCore;}')
 framework_build = add('core-build', '{isa = PBXBuildFile; productRef = '+dep+';}')
+google_navigation = add('google-navigation-package', '{isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/googlemaps/ios-navigation-sdk"; requirement = {kind = exactVersion; version = 11.1.1;};}')
+# Pin Maps too: a newer transitive release requires a higher deployment target.
+google_maps = add('google-maps-package', '{isa = XCRemoteSwiftPackageReference; repositoryURL = "https://github.com/googlemaps/ios-maps-sdk"; requirement = {kind = exactVersion; version = 11.1.1;};}')
+google_product = add('google-navigation-product', '{isa = XCSwiftPackageProductDependency; package = '+google_navigation+'; productName = GoogleNavigation;}')
+google_build = add('google-navigation-build', '{isa = PBXBuildFile; productRef = '+google_product+';}')
 sources = add('sources', '{isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = '+seq(builds)+'; runOnlyForDeploymentPostprocessing = 0;}')
-frameworks = add('frameworks', '{isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = '+seq([framework_build])+'; runOnlyForDeploymentPostprocessing = 0;}')
-resource_files = []
+frameworks = add('frameworks', '{isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = '+seq([framework_build,google_build])+'; runOnlyForDeploymentPostprocessing = 0;}')
+resource_files = list(asset_builds)
 for sound in sorted((ROOT/'App/Resources').glob('*.mp3')):
     ref = add('sound:'+sound.name, '{isa = PBXFileReference; lastKnownFileType = audio.mp3; path = '+quoted(str(sound.relative_to(ROOT)))+'; sourceTree = SOURCE_ROOT;}')
     resource_files.append(add('sound-build:'+sound.name, '{isa = PBXBuildFile; fileRef = '+ref+';}'))
@@ -56,11 +65,13 @@ for config in ['Debug', 'Release']:
     project_configs.append(add('project:'+config,'{isa = XCBuildConfiguration; buildSettings = '+settings(common)+'; name = '+config+';}'))
     app={'PRODUCT_BUNDLE_IDENTIFIER':'com.indoorbility.app','PRODUCT_NAME':'$(TARGET_NAME)','GENERATE_INFOPLIST_FILE':'YES','INFOPLIST_KEY_CFBundleDisplayName':'Indoorbility','INFOPLIST_KEY_UILaunchScreen_Generation':'YES','INFOPLIST_KEY_UIApplicationSceneManifest_Generation':'YES','INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone':'UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight','INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad':'UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight','TARGETED_DEVICE_FAMILY':'1,2','SUPPORTED_PLATFORMS':'iphoneos iphonesimulator','INFOPLIST_KEY_NSCameraUsageDescription':'Indoorbility uses the camera to read signs, capture a space with LiDAR, locate you within your saved scans, and recognize optional facial gestures.','INFOPLIST_KEY_NSMicrophoneUsageDescription':'Indoorbility listens for a short command only when you tap Listen.','INFOPLIST_KEY_NSSpeechRecognitionUsageDescription':'Indoorbility recognizes your spoken navigation commands on supported devices.','MARKETING_VERSION':'0.3.0','CURRENT_PROJECT_VERSION':'1','CODE_SIGN_STYLE':'Automatic','SWIFT_EMIT_LOC_STRINGS':'YES'}
     app['INFOPLIST_KEY_NSLocationWhenInUseUsageDescription'] = 'Indoorbility uses your location for outdoor directions and to remember a confirmed entrance. GPS never establishes your indoor position.'
+    if (ROOT/'App/Assets.xcassets/AppIcon.appiconset').exists():
+        app['ASSETCATALOG_COMPILER_APPICON_NAME'] = 'AppIcon'
     if team: app['DEVELOPMENT_TEAM'] = team
     app_configs.append(add('app:'+config,'{isa = XCBuildConfiguration; buildSettings = '+settings(app)+'; name = '+config+';}'))
 pconfigs=add('project-configs','{isa = XCConfigurationList; buildConfigurations = '+seq(project_configs)+'; defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;}')
 aconfigs=add('app-configs','{isa = XCConfigurationList; buildConfigurations = '+seq(app_configs)+'; defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;}')
-target=add('target','{isa = PBXNativeTarget; buildConfigurationList = '+aconfigs+'; buildPhases = '+seq([sources,frameworks,resources])+'; buildRules = (); dependencies = (); name = Indoorbility; packageProductDependencies = '+seq([dep])+'; productName = Indoorbility; productReference = '+product+'; productType = "com.apple.product-type.application";}')
+target=add('target','{isa = PBXNativeTarget; buildConfigurationList = '+aconfigs+'; buildPhases = '+seq([sources,frameworks,resources])+'; buildRules = (); dependencies = (); name = Indoorbility; packageProductDependencies = '+seq([dep,google_product])+'; productName = Indoorbility; productReference = '+product+'; productType = "com.apple.product-type.application";}')
 test_file=add('ui-file', '{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/IndoorbilityUITests.swift; sourceTree = "<group>";}')
 test_build=add('ui-build', '{isa = PBXBuildFile; fileRef = '+test_file+';}')
 test_product=add('ui-product','{isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = IndoorbilityUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR;}')
@@ -76,7 +87,7 @@ test_config_list=add('ui-configs','{isa = XCConfigurationList; buildConfiguratio
 proxy=add('ui-proxy','{isa = PBXContainerItemProxy; containerPortal = '+key('project')+'; proxyType = 1; remoteGlobalIDString = '+target+'; remoteInfo = Indoorbility;}')
 test_dependency=add('ui-dependency','{isa = PBXTargetDependency; target = '+target+'; targetProxy = '+proxy+';}')
 test_target=add('ui-target','{isa = PBXNativeTarget; buildConfigurationList = '+test_config_list+'; buildPhases = '+seq([test_sources,test_frameworks])+'; buildRules = (); dependencies = '+seq([test_dependency])+'; name = IndoorbilityUITests; productName = IndoorbilityUITests; productReference = '+test_product+'; productType = "com.apple.product-type.bundle.ui-testing";}')
-project=add('project','{isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1600;}; buildConfigurationList = '+pconfigs+'; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = '+main+'; packageReferences = '+seq([package])+'; productRefGroup = '+products+'; projectDirPath = ""; projectRoot = ""; targets = '+seq([target,test_target])+';}')
+project=add('project','{isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 1600;}; buildConfigurationList = '+pconfigs+'; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base); mainGroup = '+main+'; packageReferences = '+seq([package,google_navigation,google_maps])+'; productRefGroup = '+products+'; projectDirPath = ""; projectRoot = ""; targets = '+seq([target,test_target])+';}')
 folder=ROOT/'Indoorbility.xcodeproj'; folder.mkdir(exist_ok=True)
 (folder/'project.pbxproj').write_text('// !$*UTF8*$!\n{archiveVersion = 1; classes = {}; objectVersion = 56; objects = {\n'+'\n'.join(k+' = '+v+';' for k,v in objects.items())+'\n}; rootObject = '+project+';}\n')
 schemes=folder/'xcshareddata/xcschemes'; schemes.mkdir(parents=True,exist_ok=True)

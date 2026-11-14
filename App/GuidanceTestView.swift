@@ -18,6 +18,10 @@ struct GuidanceTestView: View {
                 Text(follower.map { LiveGuidance.message($0, feet: UserDefaults.standard.bool(forKey: "guidanceFeet")).text } ?? "Start the test.")
                     .font(.title2).accessibilityIdentifier("testGuidanceInstruction")
                 Text(note)
+                TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                    Text(store.audio.journeyLoopPlaying ? "Travel loop: Playing" : "Travel loop: Stopped")
+                        .font(.caption).accessibilityIdentifier("testJourneyLoopState")
+                }
                 Button("Start Test", action: start)
                 Button("Advance position", action: advance).disabled(follower == nil)
                 Button("Simulate tracking loss") { follower?.invalidate(); deliver() }
@@ -76,5 +80,6 @@ struct GuidanceTestView: View {
         guard let follower else { return }
         let message = LiveGuidance.message(follower, feet: UserDefaults.standard.bool(forKey: "guidanceFeet"))
         if delivery.consume(message, listening: false) { store.speak(message.text); if let cue = message.cue { store.cue(cue) } }
+        store.updateJourneySound(active: follower.stable && follower.state == .guiding)
     }
 }

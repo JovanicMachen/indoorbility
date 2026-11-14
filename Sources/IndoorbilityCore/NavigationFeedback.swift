@@ -1,5 +1,32 @@
 import Foundation
 
+/// Cancellation shared by the UI and an audio worker. A queued playback must
+/// recheck after slow activation so Stop/Mute cannot be undone by old work.
+public final class AudioRequestGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = UUID()
+    public init() {}
+    @discardableResult public func renew() -> UUID {
+        lock.lock(); defer { lock.unlock() }
+        current = UUID(); return current
+    }
+    public func contains(_ token: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return current == token
+    }
+}
+
+public enum FloorPlaneBounds {
+    /// Point relative to the plane center, rotated into the new planeExtent's
+    /// rectangle. ARKit no longer bakes this yaw into the anchor transform.
+    public static func contains(x: Float, z: Float, width: Float, height: Float, yaw: Float) -> Bool {
+        guard [x, z, width, height, yaw].allSatisfy(\.isFinite), width > 0, height > 0 else { return false }
+        let localX = cos(yaw)*x - sin(yaw)*z
+        let localZ = sin(yaw)*x + cos(yaw)*z
+        return abs(localX) < width/2 && abs(localZ) < height/2
+    }
+}
+
 public enum SpeechImportance: Int, Comparable, Sendable {
     case routine, direction, safety
     public static func < (a: Self, b: Self) -> Bool { a.rawValue < b.rawValue }

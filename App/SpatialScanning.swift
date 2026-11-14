@@ -10,6 +10,12 @@ import IndoorbilityCore
     let root = URL.applicationSupportDirectory.appending(path: "Indoorbility/Scans")
     init() { reload() }
     func directory(_ id: UUID) -> URL { root.appending(path: id.uuidString) }
+    func navigationGeometryCache(_ id: UUID) -> URL {
+        URL.cachesDirectory.appending(path: "IndoorbilityNavigation").appending(path: id.uuidString + ".plist")
+    }
+    func navigationWorldMapCache(_ id: UUID) -> URL {
+        URL.cachesDirectory.appending(path: "IndoorbilityNavigation").appending(path: id.uuidString + ".worldmap.plist")
+    }
     func reload() {
         do {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -53,6 +59,8 @@ import IndoorbilityCore
         }
         // Hidden tombstones cannot return as routes if cleanup is interrupted.
         try? FileManager.default.removeItem(at: removed)
+        try? FileManager.default.removeItem(at: navigationGeometryCache(draft.id))
+        try? FileManager.default.removeItem(at: navigationWorldMapCache(draft.id))
         reload()
     }
     func hallway(_ draft: ScanDraft) throws -> HallwayRoute? {
@@ -81,6 +89,42 @@ import IndoorbilityCore
     }
 }
 
+/// A route needs ARKit's saved feature map, not captured triangle anchors.
+/// Keep feature points, named landmarks, coordinates and the source file intact.
+enum NavigationWorldMapArchive {
+    nonisolated static func load(sourceURL: URL, cacheURL: URL) throws -> ARWorldMap {
+        let source = try CompactNavigationGeometry.Source.read(sourceURL)
+        guard source.size > 0, source.size <= 80 * 1024 * 1024 else {
+            throw MapError.invalid("Saved positioning map is too large to open safely.")
+        }
+        if let bytes = CompressedNavigationArchive.load(at: cacheURL, source: source),
+           let map = try? NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: bytes) {
+            return map
+        }
+        let bytes = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
+        guard let map = try NSKeyedUnarchiver.unarchivedObject(ofClass: ARWorldMap.self, from: bytes) else {
+            throw MapError.invalid("Saved positioning map could not be read.")
+        }
+        // Only this newly decoded navigation copy changes. Raw feature points
+        // used for relocalization and all non-mesh anchors are retained exactly.
+        let originalAnchors = map.anchors.count
+        map.anchors.removeAll { $0 is ARMeshAnchor }
+        let removedAnchors = originalAnchors-map.anchors.count
+        // Return the usable positioning map first. Encoding/compression is not
+        // a prerequisite for camera tracking and must not delay its startup.
+        Task.detached(priority: .background) {
+            autoreleasepool {
+                if let compact = try? NSKeyedArchiver.archivedData(withRootObject: map, requiringSecureCoding: true) {
+                    try? CompressedNavigationArchive.save(compact, at: cacheURL, sourceURL: sourceURL, expected: source)
+                    // Aggregate sizes only; never coordinates or map content.
+                    print("Navigation map: source bytes=\(source.size), positioning bytes=\(compact.count), removed mesh anchors=\(removedAnchors)")
+                }
+            }
+        }
+        return map
+    }
+}
+
 struct MeshRecord: Codable, Sendable {
     let vertices: [SpatialPoint]
     let triangles: [UInt32]
@@ -100,10 +144,9 @@ struct MeshRecord: Codable, Sendable {
     private var pendingMesh: [UUID: ARMeshAnchor] = [:]
     private var meshWorkerBusy = false
     private var activeConfiguration: ARWorldTrackingConfiguration?
-    private var sawRelocalizing = false
-    private var hasInitialMap = false
+    private var savedMapTracking = SavedWorldMapTracking()
     private var trackingWasNormal = false
-    private(set) var savedMapRelocalized = false
+    var savedMapRelocalized: Bool { savedMapTracking.matched }
     private(set) var sessionResets = 0
     private(set) var sessionResumes = 0
     private(set) var trackingInterruptions = 0
@@ -120,7 +163,8 @@ struct MeshRecord: Codable, Sendable {
     func resumeTracking() {
         guard !running, let config = activeConfiguration else { return }
         startToken = UUID(); segment += 1; lastFrameTime = 0; lastDisplayTime = 0
-        config.initialWorldMap = nil // Reuse the existing session coordinate frame, not the initial snapshot.
+        // An interrupted first match must retain its initial world map.
+        if !savedMapTracking.needsInitialMapOnResume { config.initialWorldMap = nil }
         scene.session.run(config) // Preserve world coordinates and anchors.
         sessionResumes += 1; running = true
         status = "Finding your position. Confirm a known landmark."
@@ -168,6 +212,7 @@ struct MeshRecord: Codable, Sendable {
     private let depthNode = SCNNode()
     private let routeNode = SCNNode()
     private var renderedPath: [SpatialPoint] = []
+    var routeOverlayEnabled = true
     var onPose: ((SpatialPoint?, Float?, TimeInterval, Bool) -> Void)?
     override init() {
         super.init()
@@ -178,7 +223,7 @@ struct MeshRecord: Codable, Sendable {
         scene.scene.rootNode.addChildNode(routeNode)
     }
     static var supportsLiDAR: Bool { ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) }
-    func start(map: ARWorldMap? = nil, navigation: Bool = false) async {
+    func start(map: ARWorldMap? = nil, navigation: Bool = false, outdoorPreview: Bool = false) async {
         guard !running else { return }
         let token = UUID(); startToken = token
         let allowed: Bool
@@ -194,14 +239,18 @@ struct MeshRecord: Codable, Sendable {
         samples = []; landmarks = []; meshes = [:]; meshCount = 0; position = nil; canSave = false
         let config = ARWorldTrackingConfiguration()
         config.planeDetection = [.horizontal]
-        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { config.sceneReconstruction = .meshWithClassification }
-        else if Self.supportsLiDAR { config.sceneReconstruction = .mesh }
+        // Playback uses world tracking and live depth. Reconstructing a new
+        // triangle mesh is capture work and competes with relocalization.
+        if !outdoorPreview && !navigation {
+            if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) { config.sceneReconstruction = .meshWithClassification }
+            else if Self.supportsLiDAR { config.sceneReconstruction = .mesh }
+        }
         let combined: ARConfiguration.FrameSemantics = [.sceneDepth, .smoothedSceneDepth]
         if ARWorldTrackingConfiguration.supportsFrameSemantics(combined) { config.frameSemantics = combined }
         else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) { config.frameSemantics = .sceneDepth }
         else if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) { config.frameSemantics = .smoothedSceneDepth }
         config.initialWorldMap = map
-        hasInitialMap = map != nil; sawRelocalizing = false; savedMapRelocalized = false
+        savedMapTracking.reset(loadedMap: map != nil)
         activeConfiguration = config
         lastFloorTime = 0; lastObjectTime = 0; lastDisplayTime = 0; lastTime = 0
         trackingWasNormal = false; floorHazard = false; floorRecovery = 0
@@ -245,7 +294,7 @@ struct MeshRecord: Codable, Sendable {
             consumeSafety(frame)
         }
         guard case .normal = frame.camera.trackingState else {
-            if case .limited(.relocalizing) = frame.camera.trackingState { sawRelocalizing = true }
+            savedMapTracking.trackingChanged(normal: false)
             if trackingWasNormal { trackingInterruptions += 1 }
             trackingWasNormal = false
             if position != nil { segment += 1 }
@@ -255,7 +304,9 @@ struct MeshRecord: Codable, Sendable {
             return
         }
         trackingWasNormal = true
-        if hasInitialMap && sawRelocalizing { savedMapRelocalized = true }
+        // For a loaded initialWorldMap, normal tracking establishes the saved
+        // coordinate frame; an intermediate limited callback needn't be observed.
+        savedMapTracking.trackingChanged(normal: true)
         let t = frame.camera.transform.columns.3
         let p = SpatialPoint(x: t.x, y: t.y, z: t.z)
         lastValidPoseTime = frame.timestamp
@@ -445,11 +496,11 @@ struct MeshRecord: Codable, Sendable {
         }
     }
     func showRoute(_ path: [SpatialPoint], alignment: ScanAlignment, verified: Bool) {
-        routeNode.isHidden = !verified
+        routeNode.isHidden = !verified || !routeOverlayEnabled
         let alignmentStatus = verified ? "Verified mapped route" : "Finding map alignment"
         if routeAlignmentStatus != alignmentStatus { routeAlignmentStatus = alignmentStatus }
         if !verified { depthNode.isHidden = true }
-        guard verified else { return }
+        guard verified && routeOverlayEnabled else { return }
         // Saved coordinates -> live world. This also supports manual landmark recovery.
         var transform = matrix_identity_float4x4
         transform.columns.0 = SIMD4(cos(alignment.yaw), 0, sin(alignment.yaw), 0)

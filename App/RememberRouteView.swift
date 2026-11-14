@@ -24,13 +24,18 @@ struct RememberRouteView: View {
     @State private var bestStartFix: CLLocation?
     @State private var completed: IndoorJourneyTarget?
     @State private var scanning = false
+    @State private var testRoute = false
     @State private var diagnostics = false
     @State private var editDestination = false
     @Environment(\.scenePhase) private var phase
     @Environment(\.dismiss) private var dismiss
     private var onFinished: (() -> Void)?
+    private var startingLabel: String {
+        let label = entrance.trimmingCharacters(in: .whitespacesAndNewlines)
+        return label.isEmpty ? "Recording start" : label
+    }
     private var labelsValid: Bool {
-        let values = [building, entrance, room].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let values = [building, startingLabel, room].map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         return values.allSatisfy { !$0.isEmpty } && values[1].caseInsensitiveCompare(values[2]) != .orderedSame
     }
     private var savedBuildings: [String] {
@@ -45,7 +50,7 @@ struct RememberRouteView: View {
     }
     private var startField: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("From").font(.headline)
+            Text("From (optional name)").font(.headline)
             TextField("For example, main elevator", text: $entrance)
                 .accessibilityLabel("Start location")
         }
@@ -61,15 +66,17 @@ struct RememberRouteView: View {
                         .overlay(alignment: .bottomTrailing) {
                             Image(systemName: "checkmark.circle.fill").font(.title).foregroundStyle(Color.indoorTeal).background(Color.indoorBackground, in: Circle())
                         }.accessibilityHidden(true)
-                    Text("Route recorded").font(.largeTitle.bold())
+                    Text("Route saved").font(.largeTitle.bold())
                     Label("Saved on this iPhone", systemImage: "checkmark").font(.subheadline).foregroundStyle(Color.indoorTeal)
                     Text("\(completed.route.entrance.label) → \(completed.route.room.label)").font(.headline)
                     SavedScanPreview(file: completed.library.directory(completed.draft.id).appending(path: "mesh.json"))
-                    Text("Publish your recording to find it in search.")
-                        .multilineTextAlignment(.center).foregroundStyle(.secondary)
+                    Text("Return to \(completed.route.entrance.label), then test the route.")
+                        .font(.subheadline).multilineTextAlignment(.center)
+                    Button("Follow route") { testRoute = true }
+                        .buttonStyle(.borderedProminent)
                     Button("Done") { if let onFinished { onFinished() } else { dismiss() } }
                         .buttonStyle(.borderedProminent).controlSize(.large)
-                    NavigationLink("Preview & publish") {
+                    NavigationLink("View 3D scan") {
                         VolunteerReviewView(library: library, settings: settings, draft: completed.draft, route: completed.route)
                     }.font(.subheadline)
                 }.padding(28).frame(maxWidth: .infinity)
@@ -119,7 +126,7 @@ struct RememberRouteView: View {
                         Button {
                             building = building.trimmingCharacters(in: .whitespacesAndNewlines)
                             room = room.trimmingCharacters(in: .whitespacesAndNewlines)
-                            entrance = entrance.trimmingCharacters(in: .whitespacesAndNewlines)
+                            entrance = startingLabel
                             stage = 1; error = nil; capturedDraft = nil; scanning = true
                         } label: {
                             Text("Start recording").font(.headline).frame(maxWidth: .infinity, minHeight: 48)
@@ -133,6 +140,11 @@ struct RememberRouteView: View {
             }
         }.navigationTitle(completed == nil ? "Trace route" : "Saved").navigationBarTitleDisplayMode(.inline)
             .fullScreenCover(isPresented: $scanning) { captureScreen }
+            .fullScreenCover(isPresented: $testRoute) {
+                if let completed {
+                    HallwayLaunchView(route: completed.route, draft: completed.draft, library: completed.library, settings: settings)
+                }
+            }
             .onDisappear { if !scanning { camera.stop(); location.stop() } }
     }
     private var captureScreen: some View {
@@ -171,7 +183,7 @@ struct RememberRouteView: View {
                         Button("Start here") {
                             camera.mark(entrance)
                             entranceFix = location.entranceFix ?? bestStartFix.flatMap { fix in
-                                fix.horizontalAccuracy <= 35 && abs(fix.timestamp.timeIntervalSinceNow) < 120
+                                fix.horizontalAccuracy <= 35 && abs(fix.timestamp.timeIntervalSinceNow) < 10
                                     ? EntranceLocation(latitude: fix.coordinate.latitude, longitude: fix.coordinate.longitude, accuracy: fix.horizontalAccuracy, confirmedAt: Date()) : nil
                             }
                             location.stop(); stage = 2
@@ -242,9 +254,10 @@ struct RememberRouteView: View {
                     try JSONEncoder().encode(metadata).write(to: library.directory(draft.id).appending(path: "room-metadata.json"), options: .atomic)
                 }
                 if let entranceFix { try JSONEncoder().encode(entranceFix).write(to: library.directory(draft.id).appending(path: "entrance-location.json"), options: .atomic) }
+                try library.publishRecording(route, draft: draft)
                 completed = IndoorJourneyTarget(route: route, draft: draft, library: library)
                 scanning = false
-                settings.speak("Route saved. Ready to publish.")
+                settings.speak("Route saved. Return to the start, then tap Follow route.")
             } catch { self.error = error.localizedDescription + (capturedDraft == nil ? "" : " Scan kept. Tap Save route to retry.") }
             saving = false
         }
