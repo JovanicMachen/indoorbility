@@ -7,9 +7,12 @@ struct SettingsView: View {
     @State private var confirmReset = false
     @State private var controlsPresented = false
     @State private var accessibilityPresented = false
+    @State private var cameraHelp = false
     var body: some View {
         Form {
             Section {
+                Button("Camera help", systemImage: "camera") { cameraHelp = true }
+                    .accessibilityIdentifier("cameraAssistance")
                 Button { accessibilityPresented = true } label: {
                     Label("Accessibility & guidance", systemImage: "accessibility")
                 }
@@ -46,6 +49,7 @@ struct SettingsView: View {
         .scrollContentBackground(.hidden).background(Color.indoorBackground)
         .tint(.indoorTeal)
         .sheet(isPresented: $accessibilityPresented) { GuidancePreferencesView(store: store) }
+        .fullScreenCover(isPresented: $cameraHelp) { CameraAssistanceView(settings: store) }
 
     }
     private var advanced: some View {

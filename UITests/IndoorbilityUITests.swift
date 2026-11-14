@@ -30,12 +30,26 @@ final class IndoorbilityUITests: XCTestCase {
         app.buttons["Start Test"].tap()
         XCTAssertEqual(app.staticTexts["testGuidanceInstruction"].label, "Continue straight for 100 meters.")
         for _ in 0..<8 { app.buttons["Advance position"].tap() }
-        XCTAssertEqual(app.staticTexts["testGuidanceInstruction"].label, "In 20 meters, turn left.")
+        XCTAssertEqual(app.staticTexts["testGuidanceInstruction"].label, "Continue straight. In 20 meters, turn left.")
         let mute = app.switches["Mute all app sound"]
         reveal(mute)
         if mute.value as? String != "1" { mute.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap() }
         XCTAssertEqual(mute.value as? String, "1")
         mute.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+    }
+
+    func testKnownRoomBuildingDirectionsOpensGPSWithoutSearch() throws {
+        app.tabBars.buttons["Home"].tap()
+        let field = app.textFields["destinationSearch"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap(); field.typeText("Friend 006")
+        app.buttons["Find destination"].tap()
+        let directions = app.buttons["Directions to building"]
+        XCTAssertTrue(directions.waitForExistence(timeout: 5))
+        directions.tap()
+        XCTAssertTrue(app.buttons["End directions"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.navigationBars["Find building"].exists)
+        XCTAssertFalse(app.textFields["Building or address"].exists)
     }
 
     func testKnownRoomOffersPrefilledRecording() throws {
@@ -46,13 +60,15 @@ final class IndoorbilityUITests: XCTestCase {
         app.buttons["Find destination"].tap()
         let record = app.buttons["recordKnownDestination"]
         XCTAssertTrue(record.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Friend Center · Level LL"].exists)
+        XCTAssertTrue(app.staticTexts["Level LL"].exists)
         record.tap()
+        app.buttons["Edit"].tap()
         XCTAssertTrue(app.textFields["Building name"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.textFields["Building name"].value as? String, "Friend Center for Engineering Education")
         XCTAssertEqual(app.textFields["Room or destination"].value as? String, "Room 006")
+        app.buttons["Optional details"].tap()
         XCTAssertEqual(app.textFields["Floor label (confirm from building signage)"].value as? String, "LL")
-        XCTAssertFalse(app.buttons["Start mapping"].isEnabled)
+        XCTAssertFalse(app.buttons["Start recording"].isEnabled)
     }
 
     func testFriendRoomCardOpensRecordingInsteadOfDirectory() throws {
@@ -64,7 +80,7 @@ final class IndoorbilityUITests: XCTestCase {
         XCTAssertTrue(card.waitForExistence(timeout: 5))
         card.tap()
         XCTAssertTrue(app.buttons["recordKnownDestination"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Friend Center · Level LL"].exists)
+        XCTAssertTrue(app.staticTexts["Level LL"].exists)
         XCTAssertFalse(app.navigationBars["Friend Center"].exists)
     }
 
@@ -75,25 +91,28 @@ final class IndoorbilityUITests: XCTestCase {
         field.tap(); field.typeText("Friend Center 005")
         app.buttons["Find destination"].tap()
         XCTAssertTrue(app.buttons["recordKnownDestination"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Friend Center · confirm the floor"].exists)
+        XCTAssertTrue(app.staticTexts["Friend Center"].exists)
+        XCTAssertFalse(app.staticTexts["Level LL"].exists)
         app.buttons["recordKnownDestination"].tap()
+        app.buttons["Edit"].tap()
         XCTAssertTrue(app.textFields["Building name"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.textFields["Building name"].value as? String, "Friend Center for Engineering Education")
         XCTAssertEqual(app.textFields["Room or destination"].value as? String, "Room 005")
-        XCTAssertEqual(app.textFields["Floor label (confirm from building signage)"].value as? String, "Floor")
-        XCTAssertFalse(app.buttons["Start mapping"].isEnabled)
+        app.buttons["Optional details"].tap()
+        XCTAssertEqual(app.textFields["Floor label (confirm from building signage)"].value as? String, "Floor label (optional)")
+        XCTAssertFalse(app.buttons["Start recording"].isEnabled)
     }
 
-    func testMapSearchOffersRoomTracing() throws {
+    func testHomeSearchOffersRoomTracing() throws {
         app.tabBars.buttons["Home"].tap()
-        app.buttons["Map"].firstMatch.tap()
-        let field = app.textFields["mapDestinationSearch"]
+        let field = app.textFields["destinationSearch"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         field.tap(); field.typeText("Friend Center room 005")
-        app.buttons["Find"].tap()
+        app.buttons["Find destination"].tap()
         XCTAssertTrue(app.buttons["recordKnownDestination"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Room 005"].exists)
-        XCTAssertTrue(app.staticTexts["Friend Center · confirm the floor"].exists)
+        XCTAssertTrue(app.staticTexts["Friend Center"].exists)
+        XCTAssertFalse(app.staticTexts["Level LL"].exists)
     }
 
     func testDestinationSearchMovesUpWhenEditing() throws {
@@ -113,7 +132,7 @@ final class IndoorbilityUITests: XCTestCase {
     }
 
     func testCameraAssistanceIsReachableWithoutSavedRoute() throws {
-        app.tabBars.buttons["Help"].tap()
+        settingsRoot()
         XCTAssertTrue(app.buttons["cameraAssistance"].waitForExistence(timeout: 5))
         app.buttons["cameraAssistance"].tap()
         let permission = XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.buttons["Allow"]
@@ -127,7 +146,7 @@ final class IndoorbilityUITests: XCTestCase {
     func testHomeAccessibilityHasSimplePreferences() throws {
         app.tabBars.buttons["Home"].tap()
         app.buttons["Accessibility"].tap()
-        XCTAssertTrue(app.switches["Tap instead of holding to speak"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.switches["Tap to speak"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.switches["Avoid stairs"].exists)
         XCTAssertTrue(app.switches["Higher contrast"].exists)
         capture("19-accessibility-preferences")
@@ -138,8 +157,9 @@ final class IndoorbilityUITests: XCTestCase {
         app.buttons["AI connection"].tap()
         XCTAssertTrue(app.navigationBars["AI connection"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.secureTextFields["One-time pairing code"].exists)
-        XCTAssertTrue(app.switches["Use cloud navigation assistant"].exists)
+        XCTAssertTrue(app.switches["Cloud AI"].exists)
         capture("17-agent-connection")
+        app.buttons["Privacy & pairing"].tap()
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Never enter an OpenAI API key")).firstMatch.exists)
     }
     func testShoppingAgentOfflineUsesActualDemoPlanner() throws {
@@ -161,28 +181,28 @@ final class IndoorbilityUITests: XCTestCase {
         XCTAssertFalse(app.tabBars.buttons["Scan"].exists)
         capture("18-plum-peach-home")
         openSettingsTool("Remember a route")
-        XCTAssertTrue(app.staticTexts["Mapping requires a physical LiDAR-equipped iPhone or iPad."].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["Start mapping"].isEnabled)
+        XCTAssertTrue(app.staticTexts["Recording requires a LiDAR-equipped iPhone or iPad."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Start recording"].isEnabled)
     }
 
-    func testLocalAssistantRejectsUnknownPlaceAndOptimizesShopping() throws {
-        app.tabBars.buttons["Help"].tap()
-        let request = app.descendants(matching: .any).matching(identifier: "assistantRequest").firstMatch
-        request.tap(); request.typeText("Take me to Room 999")
-        reveal(app.buttons["assistantPlan"])
-        app.buttons["assistantPlan"].tap()
-        capture("23-assistant-answer")
-        reveal(app.staticTexts["assistantResponse"])
-        XCTAssertTrue(app.staticTexts["assistantResponse"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["assistantResponse"].label.contains("verified location"))
-        request.tap()
-        request.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: "Take me to Room 999".count))
-        request.typeText("Buy milk, cereal, unknown product")
-        app.buttons["assistantPlan"].tap()
-        XCTAssertTrue(app.staticTexts["Fictional store simulation"].waitForExistence(timeout: 5))
-        app.swipeUp()
-        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Location unknown: unknown product")).firstMatch.exists)
-        capture("16-shopping-demo")
+    func testOfflineShoppingKeepsUnknownProductsUnlocated() throws {
+        openSettingsTool("Shopping demonstration")
+        let input = app.textViews["Add or paste shopping items"]
+        input.tap(); input.typeText("milk, cereal, unknown product")
+        app.buttons["Add items"].tap()
+        let unknown = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Location unknown: unknown product")).firstMatch
+        reveal(unknown)
+        XCTAssertTrue(unknown.label.contains("excluded from routing"))
+    }
+
+    func testBlankAreaDismissesSearchKeyboard() throws {
+        app.tabBars.buttons["Home"].tap()
+        let field = app.textFields["destinationSearch"]
+        field.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)).tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["holdToTalk"].isHittable)
     }
 
     func testRouteReportRerouteAndNoRoute() throws {
@@ -322,16 +342,14 @@ final class IndoorbilityUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Read sign"].waitForExistence(timeout: 5))
         app.buttons["Read sign"].tap()
         app.buttons["Cancel"].tap()
-        settingsRoot()
-        reveal(app.staticTexts["lastNarration"])
-        XCTAssertTrue(app.staticTexts["lastNarration"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["lastNarration"].label.contains("cancelled"))
-        // Wait for SwiftUI to render the new spoken-preview text after the tap.
-        reveal(app.buttons["previewNarration"])
-        app.buttons["previewNarration"].tap()
-        let ready = expectation(for: NSPredicate(format: "label CONTAINS %@", "narration is ready"), evaluatedWith: app.staticTexts["lastNarration"])
-        wait(for: [ready], timeout: 5)
-        capture("11-narration-settings")
+        openSettingsTool("AI connection")
+        let developer = app.switches["Show agent timeline"]
+        reveal(developer)
+        if developer.value as? String != "1" { developer.switches.firstMatch.exists ? developer.switches.firstMatch.tap() : developer.tap() }
+        reveal(app.buttons["testNavigation"]); app.buttons["testNavigation"].tap()
+        let lastSpeech = app.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "Last requested speech:")).firstMatch
+        reveal(lastSpeech)
+        XCTAssertTrue(lastSpeech.label.contains("cancelled"))
         app.terminate()
         app.launch()
         openSettingsTool("Demo navigation")

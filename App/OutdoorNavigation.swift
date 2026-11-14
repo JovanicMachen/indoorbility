@@ -247,7 +247,11 @@ struct OutdoorRouteView: View {
                 if let indoor { HallwayLaunchView(route: indoor.route, draft: indoor.draft, library: indoor.library, settings: settings, approachDistance: approachDistance) }
             }
             .sheet(item: $roomRequest, onDismiss: resumeCamera) { request in
-                RecordDestinationView(settings: settings, request: request, alreadyInside: insideBuilding, buildingDestination: destination)
+                RecordDestinationView(settings: settings, request: request, alreadyInside: insideBuilding, buildingDestination: destination, resumeDirections: {
+                    insideBuilding = false
+                    continueOutside = true
+                    roomRequest = nil
+                })
             }
             .fullScreenCover(item: $roomTarget, onDismiss: resumeCamera) { target in
                 HallwayLaunchView(route: target.route, draft: target.draft, library: target.library, settings: settings)

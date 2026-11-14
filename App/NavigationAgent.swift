@@ -277,12 +277,12 @@ struct AgentSettingsView: View {
                         do {
                             guard let base = AgentConfiguration.validatedURL(AgentConfiguration.configuredBase) else { throw MapError.invalid("Enter the hosted HTTPS URL first.") }
                             try await AgentConfiguration.pair(code: token.trimmingCharacters(in: .whitespacesAndNewlines), base: base)
-                            token = ""; enabled = true; message = "Phone paired. Cloud access renews securely."
+                            token = ""; enabled = true; message = "Phone paired."
                         } catch { message = error.localizedDescription }
                     }
                 }.disabled(pairing || token.isEmpty)
-                Toggle("Use cloud navigation assistant", isOn: $enabled)
-                Button(checking ? "Checking…" : "Check backend connection") {
+                Toggle("Cloud AI", isOn: $enabled)
+                Button(checking ? "Checking…" : "Check connection") {
                     checking = true
                     Task {
                         defer { checking = false }
@@ -301,12 +301,16 @@ struct AgentSettingsView: View {
                                 throw MapError.invalid("Connection failed. Check the HTTPS URL and whether your app token has expired.")
                             }
                             let status = try JSONDecoder().decode(AgentConnectionStatus.self, from: data)
-                            message = status.authenticated && status.modelConfigured ? "Connected and authenticated. Backend model is configured. Use a navigation command to test the model." : "Backend connected, but its model credential is missing."
+                            message = status.authenticated && status.modelConfigured ? "Connected. Try a voice command." : "AI setup incomplete. Contact your administrator."
                         } catch { message = error.localizedDescription }
                     }
                 }.disabled(checking).accessibilityIdentifier("checkAgentConnection")
-                Text("When enabled, spoken command text, mapped destination labels, route status, constraints and requested OCR evidence go to your backend and OpenAI. Raw camera images, audio recordings and pose history are not sent. Indoor positioning and routing stay on this phone.").font(.footnote)
-                Text("Use a one-time pairing code from your backend administrator. Never enter an OpenAI API key. Local navigation works offline.").font(.footnote)
+                Text("AI needs internet. Saved navigation works offline.").font(.footnote)
+                DisclosureGroup("Privacy & pairing") {
+                    Text("Shared with the server and OpenAI: command text, destination labels, route status, constraints and requested sign text.")
+                    Text("Camera images, audio recordings and position history stay on your phone. Indoor routing stays local.")
+                    Text("Get a pairing code from your administrator. Never enter an OpenAI API key.")
+                }.font(.footnote)
                 if !message.isEmpty { Text(message) }
             }
             Section("Developer") {

@@ -132,12 +132,23 @@ struct PlacesHomeView: View {
                             Text("Choose a walking destination from the results above to get directions here.").font(.footnote)
                         }.padding().background(Color.indoorCard, in: RoundedRectangle(cornerRadius: 22))
                     }
-                    if outdoor.error != nil, !query.isEmpty, matches.isEmpty, knownFriendRooms.isEmpty, RoomMappingRequest.attached(query) == nil, suggestions.results.isEmpty { Text("Place search couldn’t connect. Try again.").font(.footnote) }
-                    if let error = google.error, !query.isEmpty { Text(error).font(.footnote) }
+                    if !query.isEmpty, proposal == nil, outdoorProposal == nil,
+                       matches.isEmpty, knownFriendRooms.isEmpty, RoomMappingRequest.attached(query) == nil,
+                       suggestions.results.isEmpty, outdoor.results.isEmpty, google.results.isEmpty,
+                       !outdoor.loading, outdoor.error != nil || suggestions.error != nil || google.error != nil {
+                        Text("Can’t connect. Try again or choose a saved room.").font(.footnote)
+                            .accessibilityIdentifier("placeSearchStatus")
+                    }
                     AgentActivityView(agent: assistant.agent)
                     if !message.isEmpty { Text(message).font(.callout).foregroundStyle(highContrast ? Color.primary : Color.secondary).accessibilityIdentifier("destinationStatus") }
                     if !voice.transcript.isEmpty { Text(voice.transcript).font(.callout) }
                 }.padding(.horizontal, 24).padding(.bottom, 24)
+                    .frame(minHeight: geometry.size.height, alignment: .top)
+                    .background {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { searchFocused = false }
+                    }
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: searchExpanded)
             }.scrollDismissesKeyboard(.interactively)
                 .clipped()
@@ -299,7 +310,6 @@ struct PlacesHomeView: View {
                                 }.buttonStyle(.plain)
                             }
                         }
-                        if let error = suggestions.error { Text(error).font(.footnote) }
                         if outdoor.loading { ProgressView("Checking places…") }
                         if searched { ForEach(Array(outdoor.results.prefix(5).enumerated()), id: \.offset) { _, item in
                             Button { openOutdoor(item) } label: {
@@ -354,7 +364,7 @@ struct PlacesHomeView: View {
                     await outdoor.search(request.building)
                     guard generation == searchGeneration else { return }
                     searched = true
-                    if outdoor.results.isEmpty { message = outdoor.error ?? "No matching destination found. Check the building name; the room has not been mapped." }
+                    if outdoor.results.isEmpty { message = outdoor.error == nil ? "No match. Check the building name." : "" }
                 }
                 return
             }
@@ -387,7 +397,7 @@ struct PlacesHomeView: View {
         guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         message = "No saved indoor room matches. Checking outdoor places; indoor guidance needs a reviewed map."
         let generation = UUID(); searchGeneration = generation; let text = query
-        Task { await outdoor.search(text); guard generation == searchGeneration else { return }; searched = true; message = outdoor.error ?? "Choose the exact place to confirm it." }
+        Task { await outdoor.search(text); guard generation == searchGeneration else { return }; searched = true; message = outdoor.error == nil ? "Choose your destination." : "" }
     }
     private func propose(_ item: JourneyDestination, speak: Bool = true) {
         selectedRoomBuilding = item.building
