@@ -1,0 +1,27 @@
+{
+  "date": "2026-11-14",
+  "corePassed": 69,
+  "backendPassed": 11,
+  "distinctPassingUITests": [
+    "testAIConnectionExplainsOptInAndKeychainToken",
+    "testAccessibleCommandsRequireConfirmationAndFaceFallback",
+    "testCameraAssistanceIsReachableWithoutSavedRoute",
+    "testCancelReportDoesNotChangeRouteAndGuidanceConfirmsPosition",
+    "testDestinationHomeHasGuidedMappingPath",
+    "testHomeAccessibilityHasSimplePreferences",
+    "testInlineCameraCaptureAndMapSwitch",
+    "testLocalAssistantRejectsUnknownPlaceAndOptimizesShopping",
+    "testNarrationControlsPersistAndCameraReviewIsSpoken",
+    "testRouteReportRerouteAndNoRoute",
+    "testSampleOCRRequiresReviewAndReroutes",
+    "testScanStartingPointThenChooseDestination",
+    "testScannedStartCanBeConfirmedThroughCommandPanel",
+    "testShoppingAgentOfflineUsesActualDemoPlanner"
+  ],
+  "iphoneUnsignedBuild": "passed",
+  "initialUIRun": "11 passed, 1 narration test scroll failure",
+  "narrationRetest": "passed after correcting scroll target; assertion retained",
+  "physicalLiDARFramesCaptured": false,
+  "physicalWalkingAccuracyVerified": false,
+  "physicalARSessionContinuityVerified": false
+}

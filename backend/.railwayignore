@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!requirements.lock.txt
+!app.py
+!map_sharing.py
+!device_auth.py
+!viewer/
+!viewer/**
+
+!.railway/
+!.railway/railway.ts

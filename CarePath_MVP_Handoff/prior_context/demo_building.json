@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "building_id": "carepath_demo_learning_center",
+  "name": "Demo Learning Center",
+  "description": "Fictional demo building. Coordinates are diagram positions, NOT real-world surveyed positions.",
+  "floors": [{"id": 1, "label": "Level 1"}, {"id": 2, "label": "Level 2"}],
+  "nodes": [
+    {"id": "entrance", "label": "Entrance", "floor": 1, "kind": "entrance", "x": 30, "y": 120},
+    {"id": "lobby", "label": "Main Lobby", "floor": 1, "kind": "junction", "x": 100, "y": 120},
+    {"id": "junction_1", "label": "Level 1 Junction", "floor": 1, "kind": "junction", "x": 175, "y": 120},
+    {"id": "lift_a_1", "label": "Lift A - Level 1", "floor": 1, "kind": "elevator", "x": 230, "y": 60},
+    {"id": "lift_b_1", "label": "Lift B - Level 1", "floor": 1, "kind": "elevator", "x": 230, "y": 190},
+    {"id": "stairs_1", "label": "Stairs - Level 1", "floor": 1, "kind": "stairs", "x": 270, "y": 120},
+    {"id": "lift_a_2", "label": "Lift A - Level 2", "floor": 2, "kind": "elevator", "x": 230, "y": 60},
+    {"id": "lift_b_2", "label": "Lift B - Level 2", "floor": 2, "kind": "elevator", "x": 230, "y": 190},
+    {"id": "stairs_2", "label": "Stairs - Level 2", "floor": 2, "kind": "stairs", "x": 270, "y": 120},
+    {"id": "junction_2", "label": "Level 2 Junction", "floor": 2, "kind": "junction", "x": 335, "y": 120},
+    {"id": "room_204", "label": "Room 204", "floor": 2, "kind": "room", "x": 420, "y": 120}
+  ],
+  "edges": [
+    {"id":"e1","from":"entrance","to":"lobby","distance":8,"kind":"hallway","verified":true,"blocked":false},
+    {"id":"e2","from":"lobby","to":"junction_1","distance":7,"kind":"hallway","verified":true,"blocked":false},
+    {"id":"e3","from":"junction_1","to":"lift_a_1","distance":6,"kind":"hallway","verified":true,"blocked":false},
+    {"id":"e4","from":"junction_1","to":"lift_b_1","distance":10,"kind":"hallway","verified":true,"blocked":false},
+    {"id":"e5","from":"junction_1","to":"stairs_1","distance":3,"kind":"hallway","verified":true,"blocked":false},
+    {"id":"lift_a","from":"lift_a_1","to":"lift_a_2","distance":4,"kind":"elevator","verified":true,"blocked":false},
+    {"id":"lift_b","from":"lift_b_1","to":"lift_b_2","distance":4,"kind":"elevator","verified":true,"blocked":false},
+    {"id":"stair_connector","from":"stairs_1","to":"stairs_2","distance":4,"kind":"stairs","verified":true,"blocked":false},
+    {"id":"e6","from":"lift_a_2","to":"junction_2","distance":6,"kind":"hallway","verified":true,"blocked":false},
+    {"id":"e7","from":"lift_b_2","to":"junction_2","distance":10,"kind":"hallway","verified":true,"blocked":false},
+    {"id":"e8","from":"stairs_2","to":"junction_2","distance":3,"kind":"hallway","verified":true,"blocked":false},
+    {"id":"e9","from":"junction_2","to":"room_204","distance":8,"kind":"hallway","verified":true,"blocked":false}
+  ],
+  "demo_barrier_report": {
+    "id":"demo_outage_a", "target_edge_id":"lift_a", "text":"LIFT A OUT OF SERVICE", "status":"proposed", "source":"simulated_camera_photo", "requires_user_confirmation":true
+  }
+}

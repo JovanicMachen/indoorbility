@@ -1,0 +1,91 @@
+{
+  "modelInvocation": "real",
+  "pose": "synthetic",
+  "ARKitTested": false,
+  "cameraTested": false,
+  "outcomes": [
+    {
+      "request": "Take me to Room 106.",
+      "destination": "Room 106",
+      "remainingMetres": 6,
+      "posePreserved": true
+    },
+    {
+      "request": "Actually, Room 105 instead.",
+      "destination": "Room 105",
+      "remainingMetres": 2,
+      "posePreserved": true
+    },
+    {
+      "request": "What's in front of me?",
+      "destination": "Room 105",
+      "remainingMetres": 2,
+      "posePreserved": true
+    }
+  ],
+  "trace": [
+    {
+      "runId": "HzNmQuYug56FNCB6dC8bhsJP90oruxrV",
+      "tool": "resolveDestination",
+      "callId": "call_h3G4dKByNfZJN0eVqUtRSpN1",
+      "status": "success",
+      "revision": 0,
+      "result": "Destination resolved."
+    },
+    {
+      "runId": "HzNmQuYug56FNCB6dC8bhsJP90oruxrV",
+      "tool": "calculateAccessibleRoute",
+      "callId": "call_KM5rAuxaMCaPnPyVHRQ2gscj",
+      "status": "success",
+      "revision": 0,
+      "result": "Route calculated from synthetic verified position."
+    },
+    {
+      "runId": "HzNmQuYug56FNCB6dC8bhsJP90oruxrV",
+      "tool": "changeDestination",
+      "callId": "call_Ysp5QrTXNAs3ZGbaNWtMAnhZ",
+      "status": "success",
+      "revision": 1,
+      "result": "Route changed to Room 106. Follow the mapped hallway."
+    },
+    {
+      "runId": "ZqZUhwIZUiuclQjY_0d7F3MvKY4cOgkv",
+      "tool": "resolveDestination",
+      "callId": "call_ZvZQKvXYEAnz8JFvcPZu9ytj",
+      "status": "success",
+      "revision": 1,
+      "result": "Destination resolved."
+    },
+    {
+      "runId": "ZqZUhwIZUiuclQjY_0d7F3MvKY4cOgkv",
+      "tool": "calculateAccessibleRoute",
+      "callId": "call_AOCwx4VBh6NxE28SkfoB2nZS",
+      "status": "success",
+      "revision": 1,
+      "result": "Route calculated from synthetic verified position."
+    },
+    {
+      "runId": "ZqZUhwIZUiuclQjY_0d7F3MvKY4cOgkv",
+      "tool": "changeDestination",
+      "callId": "call_LNVNAnylnGkw0NJacktMtK1l",
+      "status": "success",
+      "revision": 2,
+      "result": "Route changed to Room 105. Follow the mapped hallway."
+    },
+    {
+      "runId": "bkxO74AioB8DsME4QteSM_3TCXvt9znW",
+      "tool": "describeCurrentView",
+      "callId": "call_bQv8kecgeezkmrdGJkiKTLZ0",
+      "status": "unavailable",
+      "revision": 2,
+      "result": "No camera exists in this command-line probe. A physical iPhone is required for OCR and depth observations."
+    }
+  ],
+  "verificationDate": "2026-11-14",
+  "transport": "http://127.0.0.1:8765",
+  "limitations": [
+    "Synthetic mapped hallway and pose; actual Swift HallwayFollower execution.",
+    "No physical ARKit, microphone, speaker or camera verification.",
+    "Public HTTPS health passed; authenticated tunnel test blocked by automatic approval review."
+  ]
+}

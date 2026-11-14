@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "building_id": "retail-demo",
+  "name": "Corner Market \u2014 fictional demo",
+  "description": "Fictional store and product positions for manual simulation.",
+  "floors": [
+    {
+      "id": 0,
+      "label": "Demo floor"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "entrance",
+      "label": "Store entrance",
+      "x": 0,
+      "y": 0,
+      "kind": "entrance",
+      "floor": 0
+    },
+    {
+      "id": "junction",
+      "label": "Main aisle",
+      "x": 4,
+      "y": 0,
+      "kind": "junction",
+      "floor": 0
+    },
+    {
+      "id": "milk",
+      "label": "Milk",
+      "x": 4,
+      "y": 4,
+      "kind": "item",
+      "floor": 0
+    },
+    {
+      "id": "cereal",
+      "label": "Cereal",
+      "x": 8,
+      "y": 4,
+      "kind": "item",
+      "floor": 0
+    },
+    {
+      "id": "paper",
+      "label": "Paper towels",
+      "x": 8,
+      "y": 0,
+      "kind": "item",
+      "floor": 0
+    },
+    {
+      "id": "shampoo",
+      "label": "Shampoo",
+      "x": 12,
+      "y": 0,
+      "kind": "item",
+      "floor": 0
+    },
+    {
+      "id": "checkout",
+      "label": "Checkout",
+      "x": 12,
+      "y": -4,
+      "kind": "checkout",
+      "floor": 0
+    }
+  ],
+  "edges": [
+    {
+      "id": "entry",
+      "to": "junction",
+      "distance": 4,
+      "kind": "hallway",
+      "verified": true,
+      "blocked": false,
+      "from": "entrance"
+    },
+    {
+      "id": "dairy",
+      "to": "milk",
+      "distance": 4,
+      "kind": "hallway",
+      "verified": true,
+      "blocked": false,
+      "from": "junction"
+    },
+    {
+      "id": "breakfast",
+      "to": "cereal",
+      "distance": 4,
+      "kind": "hallway",
+      "verified": true,
+      "blocked": false,
+      "from": "milk"
+    },
+    {
+      "id": "cross",
+      "to": "paper",
+      "distance": 4,
+      "kind": "hallway",
+      "verified": true,
+      "blocked": false,
+      "from": "cereal"
+    },
+    {
+      "id": "main",
+      "to": "paper",
+      "distance": 4,
+      "kind": "hallway",
+      "verified": true,
+      "blocked": false,
+      "from": "junction"
+    },
+    {
+      "id": "care",
+      "to": "shampoo",
+      "distance": 4,
+      "kind": "hallway",
+      "verified": true,
+      "blocked": false,
+      "from": "paper"
+    },
+    {
+      "id": "pay",
+      "to": "checkout",
+      "distance": 4,
+      "kind": "hallway",
+      "verified": true,
+      "blocked": false,
+      "from": "shampoo"
+    },
+    {
+      "id": "checkout_link",
+      "to": "checkout",
+      "distance": 6,
+      "kind": "hallway",
+      "verified": true,
+      "blocked": false,
+      "from": "paper"
+    }
+  ]
+}

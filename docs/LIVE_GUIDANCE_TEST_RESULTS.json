@@ -1,0 +1,13 @@
+{
+  "core_tests_passed": 72,
+  "backend_offline_tests_passed": 11,
+  "ui_initial_passed": 15,
+  "ui_initial_total": 16,
+  "ui_corrected_retest_passed": 1,
+  "distinct_ui_cases_passed": 16,
+  "real_model_call_performed_this_change": false,
+  "physical_lidar_verified": false,
+  "walking_accuracy_verified": false,
+  "notes": "Help keyboard/dock visibility fixed; all distinct UI cases pass across full run and focused rerun.",
+  "iphone_unsigned_build": "passed"
+}
