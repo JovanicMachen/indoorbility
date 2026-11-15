@@ -198,10 +198,14 @@ struct CapturedSignReview: View {
                 .onAppear { store.speak("Captured sign: " + evidence.text + ". Review the starting point below. Nothing changes until you confirm.") }
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { store.speak("Sign review cancelled. Your starting point has not changed."); dismiss() }
+                        Button("Cancel") {
+                            store.stopSpeech()
+                            store.speak("Sign review cancelled. Your starting point has not changed.", userRequested: true)
+                            dismiss()
+                        }
                     }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Read sign", systemImage: "speaker.wave.2") { store.speak("Captured sign: " + evidence.text) }
+                        Button("Read sign", systemImage: "speaker.wave.2") { store.speak("Captured sign: " + evidence.text, userRequested: true) }
                             .disabled(!store.preferences.speech && !UIAccessibility.isVoiceOverRunning)
                     }
                 }

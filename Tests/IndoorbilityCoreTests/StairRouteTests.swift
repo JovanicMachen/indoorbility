@@ -16,7 +16,7 @@ final class StairRouteTests: XCTestCase {
     func makeDraft(gap: Bool = false) -> ScanDraft {
         let points = (0...20).map { SpatialPoint(x: Float($0)*0.5, y: -Float($0)*0.15, z: 0) }
         return ScanDraft(name: "Measured stairs", usesLiDAR: true, hasWorldMap: true,
-            samples: points.enumerated().map { ScanSample(position: $0.element, segment: gap && $0.offset > 10 ? 1 : 0) },
+            samples: points.enumerated().map { ScanSample(position: gap && $0.offset > 10 ? SpatialPoint(x: $0.element.x + 4, y: $0.element.y, z: $0.element.z) : $0.element, segment: gap && $0.offset > 10 ? 1 : 0) },
             landmarks: [ScanLandmark(label: "Start", kind: "entrance", position: points.first!),
                         ScanLandmark(label: "Room", kind: "room", position: points.last!)],
             meshVertexCount: 30, meshTriangleCount: 10)

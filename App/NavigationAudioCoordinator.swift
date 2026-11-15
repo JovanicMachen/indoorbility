@@ -8,6 +8,11 @@ import IndoorbilityCore
     var isSpeaking: Bool { current != nil }
     private let synth = AVSpeechSynthesizer()
     private var queue = NavigationSpeechQueue()
+    private var admission = SpeechAdmission()
+    private var relevance: [UUID: () -> Bool] = [:]
+    private var lostHandlers: [UUID: () -> Void] = [:]
+    private var pendingKeys: [UUID: String] = [:]
+    private var announcementWatchdog: Task<Void, Never>?
     var onSpeakingChanged: (() -> Void)?
     private var current: PendingSpeech? { didSet { onSpeakingChanged?() } }
     private var utterance: AVSpeechUtterance?
@@ -19,22 +24,70 @@ import IndoorbilityCore
         NotificationCenter.default.addObserver(self, selector: #selector(interrupted), name: UIAccessibility.voiceOverStatusDidChangeNotification, object: nil)
     }
     @objc private func interrupted() { stop() }
-    func stop() { queue.clear(); current = nil; utterance = nil; synth.stopSpeaking(at: .immediate) }
-    func speak(_ text: String, priority: SpeechImportance = .routine, positionTime: Double? = nil) {
-        let line = PendingSpeech(text, priority: priority, now: ProcessInfo.processInfo.systemUptime, positionTime: positionTime)
-        if current?.text == text { return }
+    func stop() {
+        announcementWatchdog?.cancel(); announcementWatchdog = nil
+        queue.clear(); admission.reset(); relevance = [:]; lostHandlers = [:]; pendingKeys = [:]
+        current = nil; utterance = nil; synth.stopSpeaking(at: .immediate)
+    }
+    @discardableResult func speak(_ text: String, priority: SpeechImportance = .routine, positionTime: Double? = nil,
+               userRequested: Bool = false, speechKey: String? = nil, stillRelevant: (() -> Bool)? = nil,
+               onDiscard: (() -> Void)? = nil) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        let line = PendingSpeech(text, priority: priority, now: now, positionTime: positionTime,
+                                 userRequested: userRequested, deduplicationKey: speechKey)
+        guard admission.allows(line, active: current, now: now) else { return false }
         if let active = current, NavigationSpeechQueue.shouldInterrupt(active: active, incoming: line) {
-            // An obsolete direction must not finish (or resume after a warning).
+            // Safety stops a direction immediately. Ordinary turns finish their
+            // sentence; obsolete queued turns are replaced and revalidated.
+            announcementWatchdog?.cancel()
             current = nil; utterance = nil; synth.stopSpeaking(at: .immediate)
         }
+        relevance[line.id] = stillRelevant
+        lostHandlers[line.id] = onDiscard
+        pendingKeys[line.id] = line.deduplicationKey
         queue.push(line); advance()
+        prunePending()
+        return true
+    }
+    private func prunePending() {
+        var keep = queue.pendingIDs
+        if let current { keep.insert(current.id) }
+        let removed = Set(pendingKeys.keys).subtracting(keep)
+        for id in removed {
+            if let key = pendingKeys.removeValue(forKey: id) { admission.forget(key) }
+            let valid = relevance.removeValue(forKey: id)?() ?? true
+            let handler = lostHandlers.removeValue(forKey: id)
+            if valid { handler?() }
+        }
+    }
+    private func completed(_ line: PendingSpeech, lost: Bool) {
+        pendingKeys.removeValue(forKey: line.id)
+        if lost { admission.forget(line.deduplicationKey) }
+        let valid = relevance.removeValue(forKey: line.id)?() ?? true
+        let handler = lostHandlers.removeValue(forKey: line.id)
+        if lost && valid { handler?() }
     }
     private func advance() {
+        let checks = relevance
         guard current == nil, UIApplication.shared.applicationState == .active,
-              let line = queue.next(now: ProcessInfo.processInfo.systemUptime) else { return }
+              let line = queue.next(now: ProcessInfo.processInfo.systemUptime,
+                                    isRelevant: { checks[$0.id]?() ?? true }) else { return }
+        admission.didStart(line, now: ProcessInfo.processInfo.systemUptime)
         current = line
+        prunePending()
         if UIAccessibility.isVoiceOverRunning {
-            UIAccessibility.post(notification: .announcement, argument: line.text); return
+            let announcement = NSAttributedString(string: line.text, attributes: [
+                .accessibilitySpeechAnnouncementPriority: line.priority == .safety ? UIAccessibilityPriority.high : UIAccessibilityPriority.low
+            ])
+            UIAccessibility.post(notification: .announcement, argument: announcement)
+            // VoiceOver can be disabled before its completion notification.
+            announcementWatchdog?.cancel()
+            announcementWatchdog = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(max(6, Double(line.text.count)*0.12+2)))
+                guard !Task.isCancelled, let self, self.current?.id == line.id else { return }
+                self.completed(line, lost: true); self.current = nil; self.advance(); self.prunePending()
+            }
+            return
         }
         let next = AVSpeechUtterance(string: line.text)
         let defaults = UserDefaults.standard
@@ -49,8 +102,10 @@ import IndoorbilityCore
     @objc private func announcementFinished(_ note: Notification) {
         guard UIAccessibility.isVoiceOverRunning,
               let text = note.userInfo?[UIAccessibility.announcementStringValueUserInfoKey] as? String,
-              current?.text == text else { return }
-        current = nil; advance()
+              let line = current, line.text == text else { return }
+        completed(line, lost: note.userInfo?[UIAccessibility.announcementWasSuccessfulUserInfoKey] as? Bool != true)
+        announcementWatchdog?.cancel(); announcementWatchdog = nil
+        current = nil; advance(); prunePending()
     }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         let started = ProcessInfo.processInfo.systemUptime
@@ -65,13 +120,17 @@ import IndoorbilityCore
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
         Task { @MainActor in
             guard self.utterance === utterance else { return }
+            if let line = self.current { self.completed(line, lost: false) }
             self.current = nil; self.utterance = nil; self.advance()
+            self.prunePending()
         }
     }
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         Task { @MainActor in
             guard self.utterance === utterance else { return }
+            if let line = self.current { self.completed(line, lost: true) }
             self.current = nil; self.utterance = nil; self.advance()
+            self.prunePending()
         }
     }
 }
@@ -84,7 +143,11 @@ actor AppAudioWorker {
         var cue: AVAudioPlayer?
         var loop: AVAudioPlayer?
         var ducked = false
+        var pendingStop: Task<Void, Never>?
+        func cancelPendingStop() { pendingStop?.cancel(); pendingStop = nil }
     }
+    /// Normalized clip followed by a silent gap, rendered once as WAV data.
+    private var loopAsset: (data: Data, clipDuration: TimeInterval)?
     private var clients: [UUID: Streams] = [:]
     private var waveCache: [String: Data] = [:]
     private var voiceLease: UUID?
@@ -100,6 +163,8 @@ actor AppAudioWorker {
             let audio = AVAudioSession.sharedInstance()
             try audio.setCategory(.playAndRecord, mode: .default,
                 options: [.defaultToSpeaker, .mixWithOthers, .allowBluetoothHFP])
+            // iOS mutes haptics in a recording-capable session unless allowed.
+            try? audio.setAllowHapticsAndSystemSoundsDuringRecording(true)
             try audio.setActive(true)
             navigationActive = true
         }
@@ -107,11 +172,12 @@ actor AppAudioWorker {
     }
     func beginRecording(lease: UUID) throws {
         assert(!Thread.isMainThread)
-        for value in clients.values { value.cue?.stop(); value.loop?.pause() }
+        for value in clients.values { value.cancelPendingStop(); value.cue?.stop(); value.loop?.pause() }
         navigationActive = false; voiceLease = lease
         do {
             let audio = AVAudioSession.sharedInstance()
             try audio.setCategory(.playAndRecord, mode: .measurement, options: [.defaultToSpeaker])
+            try? audio.setAllowHapticsAndSystemSoundsDuringRecording(true)
             try audio.setActive(true)
         } catch { if voiceLease == lease { voiceLease = nil }; throw error }
     }
@@ -122,34 +188,91 @@ actor AppAudioWorker {
     }
     func interrupted() {
         navigationActive = false; voiceLease = nil
-        for value in clients.values { value.cue?.stop(); value.loop?.stop() }
+        for value in clients.values { value.cancelPendingStop(); value.cue?.stop(); value.loop?.stop() }
     }
     func remove(_ id: UUID) {
-        clients[id]?.cue?.stop(); clients[id]?.loop?.stop(); clients[id] = nil
+        clients[id]?.cancelPendingStop(); clients[id]?.cue?.stop(); clients[id]?.loop?.stop(); clients[id] = nil
     }
     func stopCue(_ id: UUID, gate: AudioRequestGate, token: UUID) {
         guard gate.contains(token) else { return }; clients[id]?.cue?.stop()
     }
-    func loop(_ id: UUID, active: Bool, ducked: Bool, gate: AudioRequestGate, token: UUID) throws -> Bool {
+    /// `finishCurrent` lets an audible clip end before pausing (travel briefly
+    /// paused). Stop, Mute, interruptions and recording always stop at once.
+    func loop(_ id: UUID, active: Bool, ducked: Bool, finishCurrent: Bool = false, gate: AudioRequestGate, token: UUID) throws -> Bool {
         guard gate.contains(token) else { return false }
         let value = streams(id)
-        guard active else { value.loop?.pause(); return false }
+        guard active else {
+            value.cancelPendingStop()
+            guard let player = value.loop, player.isPlaying else { return false }
+            let delay = finishCurrent ? TravelLoopTiming.softStopDelay(currentTime: player.currentTime,
+                                                                       clipDuration: loopAsset?.clipDuration ?? 0) : 0
+            if delay <= 0 { player.pause(); player.currentTime = 0; return false }
+            value.pendingStop = Task {
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+                self.finishSoftStop(id)
+            }
+            return false
+        }
         guard voiceLease == nil else { return false }
-        let volume: Float = ducked ? 0.04 : 0.28
+        let volume = ducked ? TravelLoopTiming.duckedVolume : TravelLoopTiming.normalVolume
         if value.loop?.isPlaying == true {
+            value.cancelPendingStop() // Travel resumed before the clip ended: keep playing.
             if value.ducked != ducked { value.loop?.setVolume(volume, fadeDuration: 0.2) }
             value.ducked = ducked; return true
         }
         if value.loop == nil {
-            guard let url = Bundle.main.url(forResource: "JourneyLoop", withExtension: "mp3") else { return false }
-            value.loop = try AVAudioPlayer(contentsOf: url)
+            guard let asset = try preparedLoop() else { return false }
+            value.loop = try AVAudioPlayer(data: asset.data)
             value.loop?.numberOfLoops = -1; value.loop?.prepareToPlay()
         }
         guard try activateNavigation(), gate.contains(token) else { return false }
-        value.loop?.volume = 0
+        value.loop?.currentTime = 0
+        value.loop?.volume = volume
         guard value.loop?.play() == true else { return false }
-        value.ducked = ducked; value.loop?.setVolume(volume, fadeDuration: 0.2)
+        value.ducked = ducked
         return true
+    }
+    private func finishSoftStop(_ id: UUID) {
+        guard let value = clients[id], value.pendingStop != nil else { return }
+        value.pendingStop = nil
+        value.loop?.pause(); value.loop?.currentTime = 0
+    }
+    /// Decodes the bundled clip once, normalizes it and appends the silent gap.
+    private func preparedLoop() throws -> (data: Data, clipDuration: TimeInterval)? {
+        if let loopAsset { return loopAsset }
+        guard let url = Bundle.main.url(forResource: "JourneyLoop", withExtension: "mp3") else { return nil }
+        let file = try AVAudioFile(forReading: url)
+        let format = file.processingFormat
+        guard file.length > 0, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length)) else { return nil }
+        try file.read(into: buffer)
+        guard let channels = buffer.floatChannelData else { return nil }
+        let channelCount = Int(format.channelCount), frames = Int(buffer.frameLength)
+        let sampleRate = Int(format.sampleRate.rounded())
+        var peak: Float = 0
+        for c in 0..<channelCount { for i in 0..<frames { peak = max(peak, abs(channels[c][i])) } }
+        let gain = TravelLoopTiming.gain(peak: peak)
+        let gapFrames = Int(Double(sampleRate) * TravelLoopTiming.gapSeconds)
+        let total = frames + gapFrames
+        var pcm = Data(capacity: total * channelCount * 2)
+        for i in 0..<total {
+            for c in 0..<channelCount {
+                let sample = i < frames ? max(-1, min(1, channels[c][i] * gain)) : 0
+                var v = Int16(sample * 32767).littleEndian
+                withUnsafeBytes(of: &v) { pcm.append(contentsOf: $0) }
+            }
+        }
+        var data = Data()
+        func bytes(_ text: String) { data.append(contentsOf: text.utf8) }
+        func number<T: FixedWidthInteger>(_ value: T) { var v = value.littleEndian; withUnsafeBytes(of: &v) { data.append(contentsOf: $0) } }
+        let blockAlign = channelCount * 2
+        bytes("RIFF"); number(UInt32(36 + pcm.count)); bytes("WAVEfmt "); number(UInt32(16)); number(UInt16(1))
+        number(UInt16(channelCount)); number(UInt32(sampleRate)); number(UInt32(sampleRate * blockAlign))
+        number(UInt16(blockAlign)); number(UInt16(16)); bytes("data"); number(UInt32(pcm.count))
+        data.append(pcm)
+        let asset = (data: data, clipDuration: Double(frames) / Double(sampleRate))
+        loopAsset = asset
+        return asset
     }
     func cue(_ cue: GuidanceCue, id: UUID, gate: AudioRequestGate, token: UUID) throws -> Bool {
         guard gate.contains(token), voiceLease == nil else { return false }
@@ -219,15 +342,17 @@ actor AppAudioWorker {
             if began { self.stop(); await AppAudioWorker.shared.interrupted() }
         }
     }
-    func setJourneyLoop(active: Bool, ducked: Bool = false) {
+    func setJourneyLoop(active: Bool, ducked: Bool = false, finishCurrent: Bool = false) {
         let allowed = active && !interrupted
         guard allowed != loopRequested || (allowed && ducked != loopDucked) else { return }
         loopRequested = allowed; loopDucked = ducked
         let token = loopGate.renew(), id = id, gate = loopGate
+        let soft = finishCurrent && !interrupted
         if !allowed { journeyLoopPlaying = false }
         Task { [weak self] in
             do {
-                let played = try await AppAudioWorker.shared.loop(id, active: allowed, ducked: ducked, gate: gate, token: token)
+                let played = try await AppAudioWorker.shared.loop(id, active: allowed, ducked: ducked,
+                    finishCurrent: soft, gate: gate, token: token)
                 guard let self, gate.contains(token) else { return }
                 self.journeyLoopPlaying = played
                 if allowed && !played { self.loopRequested = false }
@@ -268,9 +393,11 @@ struct NavigationSoundSettings: View {
     @AppStorage("guidanceFeet") var feet = false
     @AppStorage("guidanceRate") var rate = 0.5
     @AppStorage("guidanceVoice") var voice = ""
+    @AppStorage("guidanceReminders") var reminders = false
     var body: some View {
         Toggle("Mute all app sound", isOn: $store.allSoundMuted)
         Toggle("Audio cues", isOn: $cues)
+        Toggle("Occasional direction reminders", isOn: $reminders)
         Toggle("Travel sounds & taps", isOn: $travel)
         Toggle("Directional sound (headphones)", isOn: $directional)
         Text("Indoor turn taps: one for left, two for right, three for attention.").font(.footnote)
@@ -284,22 +411,54 @@ struct NavigationSoundSettings: View {
 }
 
 @MainActor final class NavigationHaptics {
-    private var engine: CHHapticEngine?
     func play(_ cue: GuidanceCue, instruction: String) {
-        guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return }
-        do {
-            if engine == nil { engine = try CHHapticEngine() }
-            try engine?.start()
-            let times: [Double]
-            if cue == .attention { times = [0, 0.12, 0.24] }
-            else if cue == .arrived { times = [0, 0.2, 0.5] }
-            else if cue == .turn && instruction.lowercased().contains("right") { times = [0, 0.18] }
-            else { times = [0] }
-            let events = times.map { CHHapticEvent(eventType: .hapticTransient, parameters: [CHHapticEventParameter(parameterID: .hapticIntensity, value: cue == .attention ? 1 : 0.7), CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.7)], relativeTime: $0) }
-            let pattern = try CHHapticPattern(events: events, parameters: [])
-            try engine?.makePlayer(with: pattern).start(atTime: 0)
-        } catch { engine = nil }
+        let times: [Double]
+        if cue == .attention { times = [0, 0.12, 0.24] }
+        else if cue == .arrived { times = [0, 0.2, 0.5] }
+        else if cue == .turn && instruction.lowercased().contains("right") { times = [0, 0.18] }
+        else { times = [0] }
+        AppHaptics.shared.pattern(times, intensity: cue == .attention ? 1 : 0.8, sharpness: 0.7)
     }
+}
+
+/// One Core Haptics engine for the whole app. It survives audio-session
+/// changes and iOS stopping the engine, and falls back to UIKit feedback.
+@MainActor final class AppHaptics {
+    static let shared = AppHaptics()
+    private var engine: CHHapticEngine?
+    private var needsStart = true
+    private let supported = CHHapticEngine.capabilitiesForHardware().supportsHaptics
+    private func ready() -> CHHapticEngine? {
+        guard supported else { return nil }
+        if engine == nil {
+            guard let created = try? CHHapticEngine() else { return nil }
+            // Haptics only: never competes with or reconfigures speech/audio.
+            created.playsHapticsOnly = true
+            created.isAutoShutdownEnabled = true
+            created.stoppedHandler = { [weak self] _ in Task { @MainActor in self?.needsStart = true } }
+            created.resetHandler = { [weak self] in Task { @MainActor in self?.needsStart = true } }
+            engine = created; needsStart = true
+        }
+        if needsStart {
+            do { try engine?.start(); needsStart = false } catch { engine = nil; return nil }
+        }
+        return engine
+    }
+    func pattern(_ times: [Double], intensity: Float, sharpness: Float) {
+        let events = times.map { CHHapticEvent(eventType: .hapticTransient, parameters: [
+            CHHapticEventParameter(parameterID: .hapticIntensity, value: intensity),
+            CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness)], relativeTime: $0) }
+        if let engine = ready(), let pattern = try? CHHapticPattern(events: events, parameters: []),
+           (try? engine.makePlayer(with: pattern).start(atTime: CHHapticTimeImmediate)) != nil { return }
+        // Retry once with a fresh engine, then fall back to UIKit.
+        engine = nil
+        if let engine = ready(), let pattern = try? CHHapticPattern(events: events, parameters: []),
+           (try? engine.makePlayer(with: pattern).start(atTime: CHHapticTimeImmediate)) != nil { return }
+        UIImpactFeedbackGenerator(style: intensity >= 0.9 ? .heavy : .medium).impactOccurred(intensity: CGFloat(intensity))
+    }
+    func tap(_ intensity: Float = 0.6) { pattern([0], intensity: intensity, sharpness: 0.5) }
+    func selection() { pattern([0], intensity: 0.5, sharpness: 0.9) }
+    func success() { pattern([0, 0.12], intensity: 0.8, sharpness: 0.6) }
 }
 
 @MainActor final class DirectionalBeacon {

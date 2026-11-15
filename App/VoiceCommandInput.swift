@@ -2,10 +2,14 @@ import AVFoundation
 import Speech
 import Combine
 import SwiftUI
+import IndoorbilityCore
 
 /// One explicitly started utterance. Partial recognition never executes commands.
 @MainActor final class VoiceCommandInput: ObservableObject {
     static let notUnderstood = "Didn’t catch that."
+    /// Saved rooms and buildings. Speech recognition is biased toward these so
+    /// names like "Louis Armstrong" come back spelled right.
+    static var knownPlaces: [String] = []
     @Published private(set) var busy = false
     @Published private(set) var listening = false
     @Published private(set) var transcript = ""
@@ -29,7 +33,7 @@ import SwiftUI
             }
     }
 
-    func start(onResult: @escaping (String) -> Void) async {
+    func start(automaticallyFinish: Bool = true, onResult: @escaping (String) -> Void) async {
         cancel()
         let current = token
         busy = true; transcript = ""; status = "Checking microphone and speech access…"
@@ -57,7 +61,7 @@ import SwiftUI
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.requiresOnDeviceRecognition = true
             request.shouldReportPartialResults = true
-            request.contextualStrings = ["yes", "no", "repeat", "pause guidance", "start guidance", "open settings", "narration on", "narration off", "I am lost", "directions to the building", "Friend Center", "room"]
+            request.contextualStrings = ["yes", "no", "repeat", "pause guidance", "start guidance", "open settings", "narration on", "narration off", "I am lost", "directions to the building", "Friend Center", "room"] + Array(Self.knownPlaces.prefix(80))
             self.request = request; completion = onResult
             input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in request.append(buffer) }
             tapped = true
@@ -69,10 +73,12 @@ import SwiftUI
                     if let text, text != self.transcript {
                         self.transcript = text
                         self.silence?.cancel()
-                        self.silence = Task { [weak self] in
-                            try? await Task.sleep(for: .seconds(2.5))
-                            guard !Task.isCancelled, self?.token == current else { return }
-                            self?.finish()
+                        if automaticallyFinish && self.listening {
+                            self.silence = Task { [weak self] in
+                                try? await Task.sleep(for: .seconds(VoiceResponseTiming.pauseSeconds))
+                                guard !Task.isCancelled, self?.token == current else { return }
+                                self?.finish()
+                            }
                         }
                     }
                     if final, let text {
@@ -106,7 +112,7 @@ import SwiftUI
         request?.endAudio()
         let current = token
         timeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(4))
+            try? await Task.sleep(for: .seconds(VoiceResponseTiming.finalResultSeconds))
             guard !Task.isCancelled, self?.token == current else { return }
             self?.deliverOrFail()
         }

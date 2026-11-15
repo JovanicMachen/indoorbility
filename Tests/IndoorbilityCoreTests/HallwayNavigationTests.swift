@@ -5,7 +5,8 @@ final class HallwayNavigationTests: XCTestCase {
     func p(_ x: Float, _ z: Float = 0) -> SpatialPoint { SpatialPoint(x: x, y: 0, z: z) }
     func draft(gap: Bool = false) -> ScanDraft {
         ScanDraft(name: "Hallway", usesLiDAR: true, hasWorldMap: true,
-                  samples: (0...20).map { ScanSample(position: p(Float($0)/2), segment: gap && $0 > 10 ? 1 : 0) },
+                  // gap: tracking dropped and the position jumped 4 m (a real jump, not a short dropout).
+                  samples: (0...20).map { ScanSample(position: p(Float($0)/2 + (gap && $0 > 10 ? 4 : 0)), segment: gap && $0 > 10 ? 1 : 0) },
                   landmarks: [ScanLandmark(label: "Entrance", kind: "entrance", position: p(0)), ScanLandmark(label: "Room 12", kind: "room", position: p(10))],
                   meshVertexCount: 30, meshTriangleCount: 10)
     }
@@ -82,7 +83,7 @@ final class HallwayNavigationTests: XCTestCase {
         try f.finishRecordedRoute(positionVerified: true)
         XCTAssertEqual(f.state, .arrived)
         XCTAssertEqual(f.remaining, 0)
-        XCTAssertEqual(f.instruction, "You’ve arrived at the recorded endpoint.")
+        XCTAssertEqual(f.instruction, "You’ve arrived at Room 12.")
         XCTAssertFalse(f.instruction.contains("Arrival confirmed"))
     }
     func testMatchedMapResumesSameRouteAfterTrackingInterruption() throws {
@@ -281,14 +282,17 @@ final class HallwayNavigationTests: XCTestCase {
         XCTAssertThrowsError(try ScanAlignment.fit(liveA: p(0), liveB: p(1), savedA: p(0), savedB: p(1)))
         XCTAssertThrowsError(try ScanAlignment.fit(liveA: p(0), liveB: p(4), savedA: p(0), savedB: p(6)))
     }
-    func testProgressAutomaticallyAdvancesButArrivalNeedsDwellAndConfirmation() throws {
+    func testProgressAutomaticallyAdvancesAndEndStopNeedsOnlyAShortDwell() throws {
         var f = try ready()
-        for i in 1...100 { f.update(position: p(Float(i)/10), heading: 0, time: 2.5+Double(i)/10, trackingNormal: true) }
-        XCTAssertEqual(f.progress, 10, accuracy: 0.01)
-        XCTAssertNotEqual(f.state, .arrived)
+        for i in 1...80 { f.update(position: p(Float(i)/10), heading: 0, time: 2.5+Double(i)/10, trackingNormal: true) }
+        XCTAssertEqual(f.progress, 8, accuracy: 0.01)
+        XCTAssertEqual(f.state, .guiding) // 2 m from the end stop: not there yet.
         XCTAssertThrowsError(try f.confirmArrival())
-        for i in 1...25 { f.update(position: p(10), heading: 0, time: 12.5+Double(i)/10, trackingNormal: true) }
+        // Within about 5 ft of the recorded end stop for one second is enough.
+        for i in 81...90 { f.update(position: p(Float(i)/10), heading: 0, time: 2.5+Double(i)/10, trackingNormal: true) }
+        for i in 1...12 { f.update(position: p(9), heading: 0, time: 11.5+Double(i)/10, trackingNormal: true) }
         XCTAssertEqual(f.state, .nearRoom)
+        XCTAssertFalse(f.instruction.contains("label"))
         try f.confirmArrival(); XCTAssertEqual(f.state, .arrived)
     }
     func testLossFreezesProgressAndReacquiringDoesNotResume() throws {

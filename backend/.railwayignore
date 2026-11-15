@@ -4,6 +4,7 @@
 !app.py
 !map_sharing.py
 !device_auth.py
+!general_assistant.py
 !viewer/
 !viewer/**
 

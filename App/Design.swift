@@ -220,21 +220,35 @@ struct HomeHolidayBackdrop: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var phase
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 15, paused: reduceMotion || phase != .active)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || phase != .active)) { timeline in
             Canvas { context, size in
                 let time = reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate
                 // Fixed seeds keep the flakes stable across ordinary UI updates.
-                for index in 0..<36 {
+                // Gentle snowfall over the whole Home screen: soft icy-blue flakes
+                // that drift side to side, plus small snow dots for depth.
+                for index in 0..<44 {
                     let seed = Double(index)
                     let column = (seed * 0.61803398875).truncatingRemainder(dividingBy: 1)
-                    let period = 15 + Double(index % 7) * 2
+                    let near = index % 3 == 0
+                    let period = (near ? 9 : 14) + Double(index % 5) * 1.5
                     let progress = (time / period + seed * 0.137).truncatingRemainder(dividingBy: 1)
-                    let x = column * size.width + sin(time * 0.35 + seed) * 9
-                    let y = progress * (size.height + 24) - 12
-                    let radius = 1.5 + Double(index % 3) * 0.65
-                    let flake = Path(ellipseIn: CGRect(x: x, y: y, width: radius * 2, height: radius * 2))
-                    context.fill(flake, with: .color(.white.opacity(0.75)))
-                    context.stroke(flake, with: .color(Color.indoorTeal.opacity(0.13)), lineWidth: 0.6)
+                    let x = column * size.width + sin(time * 0.5 + seed) * (near ? 16 : 9)
+                    let y = progress * (size.height + 40) - 20
+                    let icy = Color(red: 0.30, green: 0.55, blue: 0.96)
+                    if index % 2 == 0 {
+                        var flake = context
+                        flake.opacity = near ? 0.85 : 0.6
+                        flake.translateBy(x: x, y: y)
+                        flake.rotate(by: .radians(time * 0.4 + seed))
+                        flake.draw(Text(Image(systemName: "snowflake")).font(.system(size: near ? 15 : 10, weight: .semibold))
+                            .foregroundColor(icy), at: .zero)
+                    } else {
+                        let radius = near ? 3.2 : 2.2
+                        let dot = Path(ellipseIn: CGRect(x: x, y: y, width: radius * 2, height: radius * 2))
+                        context.fill(dot, with: .color(.white))
+                        context.fill(dot, with: .color(icy.opacity(0.25)))
+                        context.stroke(dot, with: .color(icy.opacity(0.85)), lineWidth: 0.9)
+                    }
                 }
                 // Quiet Christmas decals stay at the edges, behind the controls.
                 let trees: [CGPoint] = [CGPoint(x: 30, y: size.height * 0.36),
@@ -263,5 +277,50 @@ struct HomeHolidayBackdrop: View {
                 }
             }
         }.allowsHitTesting(false).accessibilityHidden(true).clipped()
+    }
+}
+
+
+/// A green pine garland hanging across the top of Home, with small red and
+/// gold baubles. Static drawing (no animation), so it costs nothing per frame.
+struct HolidayGarland: View {
+    var body: some View {
+        Canvas { context, size in
+            let swags = 4
+            let width = size.width / CGFloat(swags)
+            let sag = size.height * 0.55
+            let pine = Color(red: 0.13, green: 0.50, blue: 0.27)
+            let pineLight = Color(red: 0.30, green: 0.68, blue: 0.38)
+            var rope = Path()
+            for i in 0..<swags {
+                let x0 = CGFloat(i) * width, x1 = x0 + width
+                rope.move(to: CGPoint(x: x0, y: 6))
+                rope.addQuadCurve(to: CGPoint(x: x1, y: 6), control: CGPoint(x: (x0 + x1) / 2, y: 6 + sag * 2))
+            }
+            // Thick leafy body: a wide dark stroke with a lighter, dashed needle layer.
+            context.stroke(rope, with: .color(pine), style: StrokeStyle(lineWidth: 11, lineCap: .round))
+            context.stroke(rope, with: .color(pineLight), style: StrokeStyle(lineWidth: 7, lineCap: .round, dash: [2, 4]))
+            let red = Color(red: 0.80, green: 0.16, blue: 0.24), gold = Color(red: 0.93, green: 0.72, blue: 0.25)
+            for i in 0..<swags {
+                let x0 = CGFloat(i) * width
+                // Baubles along each swag (quadratic curve points).
+                for (k, t) in [0.25, 0.5, 0.75].enumerated() {
+                    let u = CGFloat(t)
+                    let x = x0 + width * u
+                    let y = 6 + 4 * sag * (1 - u) * u // Point on the swag curve.
+                    let r: CGFloat = k == 1 ? 6 : 4.5
+                    context.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r + 6, width: r * 2, height: r * 2)),
+                                 with: .color(k == 1 ? red : gold))
+                    context.fill(Path(ellipseIn: CGRect(x: x - r * 0.45, y: y - r * 0.6 + 6, width: r * 0.6, height: r * 0.5)),
+                                 with: .color(.white.opacity(0.6)))
+                }
+                // A little bow where swags meet.
+                let bow = CGPoint(x: x0, y: 8)
+                context.draw(Text(Image(systemName: "seal.fill")).font(.system(size: 12)).foregroundColor(red), at: bow)
+            }
+        }
+        .frame(height: 34)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }

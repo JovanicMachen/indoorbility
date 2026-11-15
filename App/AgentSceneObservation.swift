@@ -37,30 +37,40 @@ enum AgentSceneObservation {
 
 /// Local ML classification, separate from central LiDAR distance (not object distance).
 enum CameraObjectEvidence {
-    static func read(_ frame: ARFrame) -> String? {
+    static func read(_ frame: ARFrame) -> String? { detect(frame)?.kind.rawValue }
+    /// Nearest chair, table or person in the walking direction. Chairs and tables
+    /// come from LiDAR mesh classification (with measured distance and side);
+    /// people come from on-device Vision. Nothing leaves the phone.
+    static func detect(_ frame: ARFrame) -> ObstacleNotice? {
+        var person: ObstacleNotice?
         let request = VNDetectHumanRectanglesRequest()
         request.upperBodyOnly = true
         do {
             try VNImageRequestHandler(cvPixelBuffer: frame.capturedImage, orientation: .right).perform([request])
-            if (request.results ?? []).contains(where: {
-                $0.confidence >= 0.85 && $0.boundingBox.midX >= 0.25 && $0.boundingBox.midX <= 0.75 && $0.boundingBox.height >= 0.15
-            }) { return "person" }
+            if let body = (request.results ?? []).filter({
+                $0.confidence >= 0.85 && $0.boundingBox.midX >= 0.2 && $0.boundingBox.midX <= 0.8 && $0.boundingBox.height >= 0.15
+            }).max(by: { $0.boundingBox.height < $1.boundingBox.height }) {
+                // Upright image: midX below 0.5 is the left half of the view.
+                let offset = Float(body.boundingBox.midX - 0.5)
+                person = ObstacleNotice(kind: .person, distance: nil, lateral: abs(offset) < 0.12 ? 0 : offset)
+            }
         } catch { /* No confident visual identity; depth remains independent. */ }
-        // Inspect a bounded sample of classified mesh faces in front of the current camera.
-        // These are reconstructed surfaces, not proof a movable object is still there.
+        // Inspect a bounded sample of classified mesh faces in front of the camera.
+        // ARKit camera space in portrait: forward is −z, the user's right is +y.
         let inverse = simd_inverse(frame.camera.transform)
-        var counts = [String: Int]()
+        var counts = [ObstacleNotice.Kind: Int]()
+        var nearest = [ObstacleNotice.Kind: (distance: Float, lateral: Float)]()
         for anchor in frame.anchors.compactMap({ $0 as? ARMeshAnchor }).prefix(24) {
             let mesh = anchor.geometry
             guard let classifications = mesh.classification else { continue }
             let faces = mesh.faces, vertices = mesh.vertices
+            guard faces.indexCountPerPrimitive == 3 else { continue }
             for face in stride(from: 0, to: faces.count, by: max(1, faces.count / 128)) {
                 let raw = classifications.buffer.contents().advanced(by: classifications.offset + face * classifications.stride).load(as: UInt8.self)
-                let kind: String
-                if Int(raw) == ARMeshClassification.table.rawValue { kind = "table" }
-                else if Int(raw) == ARMeshClassification.seat.rawValue { kind = "seat" }
+                let kind: ObstacleNotice.Kind
+                if Int(raw) == ARMeshClassification.table.rawValue { kind = .table }
+                else if Int(raw) == ARMeshClassification.seat.rawValue { kind = .chair }
                 else { continue }
-                guard faces.indexCountPerPrimitive == 3 else { continue }
                 var center = SIMD3<Float>(repeating: 0)
                 for corner in 0..<3 {
                     let ptr = faces.buffer.contents().advanced(by: (face * 3 + corner) * faces.bytesPerIndex)
@@ -70,18 +80,24 @@ enum CameraObjectEvidence {
                     center += SIMD3(v[0], v[1], v[2]) / 3
                 }
                 let p = inverse * anchor.transform * SIMD4(center.x, center.y, center.z, 1)
-                guard p.z < -0.3, p.z > -3, abs(p.x) < -p.z * 0.4, abs(p.y) < -p.z * 0.7 else { continue }
+                let forward = -p.z
+                guard forward > 0.3, forward < 3, abs(p.x) < forward * 0.4, abs(p.y) < forward * 0.7 else { continue }
                 counts[kind, default: 0] += 1
-                if counts[kind, default: 0] >= 3 { return kind }
+                if forward < nearest[kind]?.distance ?? .infinity { nearest[kind] = (forward, p.y) }
             }
         }
-        return nil
+        let surfaces = nearest.filter { counts[$0.key, default: 0] >= 3 }
+            .min(by: { $0.value.distance < $1.value.distance })
+            .map { ObstacleNotice(kind: $0.key, distance: $0.value.distance, lateral: $0.value.lateral) }
+        // A measured chair or table is more useful than a distance-less person,
+        // unless the person is the only thing seen.
+        return surfaces ?? person
     }
     static func description(_ kind: String?) -> String {
         switch kind {
-        case "person": return "Possible person ahead in the camera view. Distance to the person is unknown."
-        case "table": return "Possible table ahead in the reconstructed map; its current presence is unconfirmed."
-        case "seat": return "Possible seat ahead in the reconstructed map; its current presence is unconfirmed."
+        case "person": return "Person in front of you."
+        case "table": return "Table ahead."
+        case "chair", "seat": return "Chair ahead."
         default: return "No object confidently identified; this does not mean the path is clear."
         }
     }

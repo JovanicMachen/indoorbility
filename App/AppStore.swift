@@ -25,10 +25,14 @@ final class AppStore: ObservableObject {
         refreshJourneySound()
     }
     private func refreshJourneySound() {
+        let enabled = UserDefaults.standard.object(forKey: "travelFeedback") as? Bool ?? true
+        let appActive = UIApplication.shared.applicationState == .active
         let allowed = GuidanceSoundPolicy.journeyLoopAllowed(travelling: journeySoundActive,
-            muted: allSoundMuted, enabled: UserDefaults.standard.object(forKey: "travelFeedback") as? Bool ?? true,
-            suspended: speechSuspended, active: UIApplication.shared.applicationState == .active)
-        audio.setJourneyLoop(active: allowed, ducked: speaker.isSpeaking || UIAccessibility.isVoiceOverRunning)
+            muted: allSoundMuted, enabled: enabled, suspended: speechSuspended, active: appActive)
+        // Travel pausing for a moment lets the current clip finish; muting,
+        // disabling travel sounds or leaving the app stops immediately.
+        let soft = !allSoundMuted && enabled && !speechSuspended && appActive
+        audio.setJourneyLoop(active: allowed, ducked: speaker.isSpeaking || UIAccessibility.isVoiceOverRunning, finishCurrent: soft)
     }
     func travelFeedback(position: SIMD2<Double>?, context: String) {
         let now = ProcessInfo.processInfo.systemUptime
@@ -44,7 +48,7 @@ final class AppStore: ObservableObject {
         guard now - travelTime >= 2 else { return }
         guard !speaker.isSpeaking, !UIAccessibility.isVoiceOverRunning, now-lastPriorityCue >= 4 else { return }
         travelPosition = position; travelTime = now
-        if preferences.haptics { UIImpactFeedbackGenerator(style: .soft).impactOccurred(intensity: 0.3) }
+        if preferences.haptics { AppHaptics.shared.tap(0.45) }
         // The supplied clip loops throughout travel; this cadence supplies only taps.
     }
     func directionalCue(_ target: SIMD3<Float>?) {
@@ -107,7 +111,7 @@ final class AppStore: ObservableObject {
             let previous = session
             session = updated
             if !preferences.speech { stopSpeech() }
-            if preferences.haptics { UISelectionFeedbackGenerator().selectionChanged() }
+            if preferences.haptics { AppHaptics.shared.selection() }
             if let message = NavigationNarration.update(from: previous, to: session, instruction: instruction) { speak(message) }
         } catch {
             errorMessage = "Change not applied: \(error.localizedDescription)"
@@ -130,15 +134,18 @@ final class AppStore: ObservableObject {
         if session.needsPosition { return "Scan a room or entrance sign, or choose a starting point. Then choose Where to. This is a demo map; your position is not tracked along the route." }
         return session.route == nil ? "Choose a destination to plan your route." : "Your route is ready. Select Start for checkpoint instructions."
     }
-    func speak(_ text: String, force: Bool = false, priority: SpeechImportance = .routine, positionTime: Double? = nil) {
+    func speak(_ text: String, force: Bool = false, priority: SpeechImportance = .routine, positionTime: Double? = nil,
+               userRequested: Bool = false, speechKey: String? = nil, stillRelevant: (() -> Bool)? = nil,
+               onDiscard: (() -> Void)? = nil) {
         guard GuidanceSoundPolicy.speechAllowed(muted: allSoundMuted, enabled: preferences.speech, forced: force, voiceOver: UIAccessibility.isVoiceOverRunning, active: UIApplication.shared.applicationState == .active, suspended: speechSuspended) else { return }
+        guard speaker.speak(text, priority: priority, positionTime: positionTime, userRequested: userRequested,
+                            speechKey: speechKey, stillRelevant: stillRelevant, onDiscard: onDiscard) else { return }
         audio.stopCue()
         lastPriorityCue = ProcessInfo.processInfo.systemUptime
         lastNarration = text
         activeSpeechGeneration += 1
-        speaker.speak(text, priority: priority, positionTime: positionTime)
     }
-    func repeatInstruction() { speak(instruction) }
-    func repeatNarration() { speak(lastNarration.isEmpty ? navigationSummary : lastNarration) }
+    func repeatInstruction() { speak(instruction, userRequested: true) }
+    func repeatNarration() { speak(lastNarration.isEmpty ? navigationSummary : lastNarration, userRequested: true) }
     func stopSpeech() { journeySoundActive = false; travelPosition = nil; activeSpeechGeneration += 1; speaker.stop(); audio.stop(); beacon.stop() }
 }

@@ -19,12 +19,13 @@ private struct AgentRequest: Encodable {
     let context: AgentContext
     let runId: String?
     let result: AgentToolResult?
+    let mode: String
+    let history: [AssistantConversationMessage]
 }
 private struct AgentResponse: Decodable {
-    struct Final: Decodable { let responseCallId: String?; let clarification: String }
     let runId: String
     let call: AgentCall?
-    let final: Final?
+    let final: AgentFinalResponse?
 }
 @MainActor enum AgentConfiguration {
     // Verified on Railway: HTTPS, real agent/Swift tools, auth and restart persistence.
@@ -150,12 +151,22 @@ private struct AgentResponse: Decodable {
 }
 @MainActor protocol NavigationAgentHost: AnyObject {
     var voiceResponse: String? { get set }
+    var supportsLocalGuidanceCommands: Bool { get }
     func beginAgentTurn(_ text: String)
+    func acknowledgeAgentRequest()
+    func beginConversationTurn()
+    func presentGeneralAnswer(_ answer: String)
     func agentContext() -> AgentContext
     func executeAgent(_ call: AgentCall) async -> AgentToolResult
     func presentAgentResult(_ result: AgentToolResult)
     func presentClarification(_ text: String)
     func handleVoice(_ text: String)
+}
+extension NavigationAgentHost {
+    var supportsLocalGuidanceCommands: Bool { false }
+    func acknowledgeAgentRequest() {}
+    func beginConversationTurn() { voiceResponse = nil }
+    func presentGeneralAnswer(_ answer: String) { presentClarification("AI answer. " + answer) }
 }
 
 @MainActor final class NavigationAgent: ObservableObject {
@@ -166,6 +177,11 @@ private struct AgentResponse: Decodable {
     private var task: Task<Void, Never>?
     private var generation = UUID()
     private var runID: String?
+    private var conversation = GeneralConversation()
+    private let conversationSession = UUID().uuidString
+    func canAnswerGeneralQuestion(_ text: String) -> Bool {
+        GeneralQuestionPolicy.isGeneral(text, followsGeneral: !conversation.messages.isEmpty)
+    }
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 25
@@ -186,32 +202,74 @@ private struct AgentResponse: Decodable {
         }
         runID = nil
     }
+    /// Asks the AI for the right spelling of a misheard place ("louis rm strng"
+    /// → "Louis Armstrong"). Returns nil offline or when the AI is unsure. The
+    /// result is only used as a search query; it never starts navigation.
+    func correctPlaceName(_ text: String, known: [String]) async -> String? {
+        let heard = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (3...200).contains(heard.count), let base = AgentConfiguration.url else { return nil }
+        do {
+            let credential = try await AgentConfiguration.accessToken()
+            let context = AgentContext(sessionId: conversationSession, sessionRevision: 0, buildingId: "place-spelling", floor: nil,
+                tracking: "uncertain", destinationId: "", avoidStairs: false, instruction: "Spelling correction only.",
+                knownDestinations: known.prefix(60).map { ["name": String($0.prefix(100))] }, knownClosures: [])
+            var request = URLRequest(url: base.appending(path: "agent/turn"))
+            request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
+            request.httpBody = try JSONEncoder().encode(AgentRequest(utterance: heard, context: context, runId: nil, result: nil, mode: "place", history: []))
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count < 8192 else { return nil }
+            let reply = try JSONDecoder().decode(AgentResponse.self, from: data)
+            guard reply.call == nil, let final = reply.final, final.kind == "place", let name = final.answer?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  (2...120).contains(name.count), !name.contains("\n"), name.lowercased() != heard.lowercased() else { return nil }
+            log("Place spelling corrected")
+            return name
+        } catch { return nil }
+    }
     func submit(_ text: String, model: any NavigationAgentHost) {
         cancel(); let token = generation
-        model.beginAgentTurn(text)
-        if ["stop", "pause", "pause guidance", "stop guidance", "cancel"].contains(text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)) {
-            log("Immediate local pause · model bypassed")
-            model.handleVoice(text); return
+        let general = canAnswerGeneralQuestion(text)
+        let history = general ? conversation.messages : []
+        if general { model.beginConversationTurn() }
+        else { conversation.clear(); model.beginAgentTurn(text) }
+        if !general && AgentSpeechPolicy.isImmediateLocalCommand(text, hasDestination: model.supportsLocalGuidanceCommands) {
+            log("Immediate local control · model bypassed")
+            model.handleVoice(AgentSpeechPolicy.normalizedCommand(text)); return
         }
         guard let base = AgentConfiguration.url else {
             log("Offline fallback · cloud disabled or not configured")
             cloudStatus = UserDefaults.standard.bool(forKey: "agentCloudEnabled") ? "Cloud AI isn’t configured. Local navigation continues." : nil
-            model.handleVoice(text); return
+            if general { model.presentClarification(GeneralQuestionPolicy.offlineMessage) }
+            else { model.handleVoice(text) }
+            return
         }
         busy = true; cloudStatus = nil
         log("Model turn started · utterance withheld")
         task = Task { [weak self, weak model] in
             guard let self, let model else { return }
+            // Only acknowledge a request that actually takes time. No claim that
+            // a route or destination changed before the phone validates it.
+            let acknowledgment = Task { @MainActor [weak self, weak model] in
+                try? await Task.sleep(for: .seconds(VoiceResponseTiming.acknowledgmentSeconds))
+                guard !Task.isCancelled, let self, token == self.generation, self.busy else { return }
+                model?.acknowledgeAgentRequest()
+            }
+            defer { acknowledgment.cancel() }
             var run: String?; var result: AgentToolResult?
             var results: [String: AgentToolResult] = [:]
             var mutated = false
             let start = Date()
             do {
-                for _ in 0..<5 {
+                for _ in 0..<7 {
                     try Task.checkCancellation()
                     guard token == self.generation else { return }
                     let credential = try await AgentConfiguration.accessToken()
-                    let payload = AgentRequest(utterance: run == nil ? text : "", context: model.agentContext(), runId: run, result: result)
+                    let context = general ? AgentContext(sessionId: self.conversationSession, sessionRevision: 0,
+                        buildingId: "general-conversation", floor: nil, tracking: "uncertain", destinationId: "",
+                        avoidStairs: false, instruction: "General questions only; no live navigation evidence.",
+                        knownDestinations: [], knownClosures: []) : model.agentContext()
+                    let payload = AgentRequest(utterance: run == nil ? text : "", context: context, runId: run, result: result,
+                        mode: general ? "general" : "navigation", history: history)
                     var request = URLRequest(url: base.appending(path: "agent/turn"))
                     request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
@@ -223,6 +281,15 @@ private struct AgentResponse: Decodable {
                     let reply = try JSONDecoder().decode(AgentResponse.self, from: data)
                     guard reply.runId.count <= 100, run == nil || reply.runId == run else { throw MapError.invalid("Invalid agent continuation.") }
                     run = reply.runId; self.runID = run
+                    if general {
+                        guard reply.call == nil, let final = reply.final else { throw MapError.invalid("A general answer cannot execute device actions.") }
+                        let answer = try final.validatedGeneralAnswer(for: text, followsGeneral: !history.isEmpty)
+                        self.conversation.append(question: text, answer: answer)
+                        acknowledgment.cancel(); model.presentGeneralAnswer(answer)
+                        self.busy = false; self.runID = nil
+                        log("General answer completed; no device tools executed", run: reply.runId)
+                        return
+                    }
                     if let call = reply.call {
                         guard reply.final == nil else { throw MapError.invalid("Conflicting agent response.") }
                         log("Requested \(call.tool.rawValue) · revision \(call.expectedRevision)", run: reply.runId)
@@ -237,8 +304,12 @@ private struct AgentResponse: Decodable {
                             log("ARSession preserved: \(preserved) · pose preserved: \(actual.data["positionPreserved"] ?? "unknown") · speech generation: \(actual.data["speechGeneration"] ?? "unknown")", run: reply.runId)
                         }
                         // User-facing navigation text comes only from the authoritative local result.
-                        model.presentAgentResult(actual)
+                        if AgentSpeechPolicy.presentImmediately(tool: call.tool, status: actual.status) {
+                            acknowledgment.cancel()
+                            model.presentAgentResult(actual)
+                        }
                     } else if let final = reply.final {
+                        guard final.kind == nil || final.kind == "navigation", final.answer == nil else { throw MapError.invalid("Unexpected conversational response to navigation.") }
                         if let id = final.responseCallId {
                             guard let actual = results[id] else { throw MapError.invalid("Agent referenced an unexecuted result.") }
                             // Don't repeat an old observation after the user has moved or tracking changed.
@@ -256,7 +327,8 @@ private struct AgentResponse: Decodable {
                 log("Model/network failure · \(mutated ? "kept completed actions" : "local fallback")", run: run ?? "local")
                 self.cancel()
                 self.cloudStatus = "Cloud AI unavailable. Local navigation continues."
-                if !mutated { model.handleVoice(text) }
+                if general { model.presentClarification("General AI is unavailable right now. Your route is unchanged.") }
+                else if !mutated { model.handleVoice(text) }
                 else { model.voiceResponse = "The AI connection ended. Completed changes are kept; local guidance continues." }
             }
             self.busy = false

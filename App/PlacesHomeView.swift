@@ -15,6 +15,7 @@ struct PlacesHomeView: View {
     @AppStorage("highContrast") private var highContrast = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var searchFocused: Bool
+    @State private var pickedRecording = false
     @State private var query = ""
     @State private var recordingRoom: FriendCenter.Room?
     @State private var requestedRoom: RoomMappingRequest?
@@ -110,7 +111,7 @@ struct PlacesHomeView: View {
                                     DisclosureGroup("Other recordings (\(options.count))") {
                                         Text("Ranked by review and previous visits; confirm the starting point.").font(.footnote)
                                         ForEach(options) { option in
-                                            Button("From " + memory.startingLabel(option) + " · \(option.successfulVisits ?? 0) completed visits") { propose(option) }
+                                            Button("From " + memory.startingLabel(option) + (startDistance(option).map { " · " + LiveGuidance.distance(Float($0), feet: UserDefaults.standard.bool(forKey: "guidanceFeet")) + " away" } ?? " · \(option.successfulVisits ?? 0) completed visits")) { propose(option, choosing: false) }
                                         }
                                     }
                                 }
@@ -186,30 +187,43 @@ struct PlacesHomeView: View {
             if !searchExpanded && !highContrast { HomeHolidayBackdrop() }
         }
 
+        .overlay(alignment: .top) {
+            if !searchExpanded && !highContrast { HolidayGarland() }
+        }
         .swipeLeftToGoBack(action: goBack)
         .toolbar(.hidden, for: .navigationBar)
 
         .onAppear {
             library.reload(); memory.refresh(from: library)
             assistant.catalog = memory.preferredDestinations; assistant.preferences = store.preferences
-            assistant.found = { propose(memory.alternatives(to: $0).first ?? $0, speak: false) }
+            VoiceCommandInput.knownPlaces = Array(Set(memory.destinations.flatMap { [$0.room, $0.building] }
+                .map { $0.trimmingCharacters(in: .whitespaces) }.filter { $0.count > 2 })).sorted()
+            assistant.found = { propose($0, speak: false) }
             assistant.floorInfo = { floorDescription($0) }
             assistant.fallback = { _ in resolveLocally() }
-            assistant.speak = { message = $0; store.speak($0, force: true) }
+            assistant.speak = { message = $0; store.speak($0, force: true, userRequested: true) }
+            assistant.acknowledge = { store.speak(VoiceResponseTiming.acknowledgment, priority: .ambient) }
             if let pending = UserDefaults.standard.string(forKey: "pendingDestinationQuery"), !pending.isEmpty {
                 UserDefaults.standard.removeObject(forKey: "pendingDestinationQuery")
                 query = pending; resolvingQuery = pending; resolve()
             }
         }
-        .onDisappear { searchGeneration = UUID(); voice.cancel(); nearby.stop(); suggestions.update("", near: nil); outdoor.cancel(); google.cancel(); assistant.agent.cancel(); assistant.found = { _ in }; assistant.fallback = { _ in }; assistant.speak = { _ in }; assistant.floorInfo = { _ in "Floor label unknown" } }
+        .onDisappear { searchGeneration = UUID(); voice.cancel(); nearby.stop(); suggestions.update("", near: nil); outdoor.cancel(); google.cancel(); assistant.agent.cancel(); assistant.found = { _ in }; assistant.fallback = { _ in }; assistant.speak = { _ in }; assistant.acknowledge = {}; assistant.floorInfo = { _ in "Floor label unknown" } }
         .onChange(of: searchFocused) { _, focused in if focused { nearby.start() } }
         .onChange(of: nearby.location) { _, fix in
             outdoor.nearby = fix
+            // A better GPS fix can show a different door is closer. Switch quietly
+            // unless the user picked a recording themselves.
+            if let current = proposal, !pickedRecording, confirmation.isCurrent(current.id, now: ProcessInfo.processInfo.systemUptime) {
+                let nearer = nearestRecording(for: current)
+                if nearer.id != current.id { proposal = nearer; confirmation.propose(nearer.id, now: ProcessInfo.processInfo.systemUptime) }
+            }
             if searchFocused { suggestions.update(placeSearchText, near: fix) }
         }
         .task(id: query) {
             let text = placeSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
             outdoor.cancel(); google.cancel(); searched = false
+            if assistant.agent.canAnswerGeneralQuestion(text) { suggestions.update("", near: nil); return }
             suggestions.update(text, near: nearby.location)
             guard text.count >= 3 else { return }
             do { try await Task.sleep(for: .milliseconds(450)) } catch { return }
@@ -408,6 +422,10 @@ struct PlacesHomeView: View {
         resolvingQuery = query
         confirmation.cancel(); proposal = nil; outdoorProposal = nil
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if assistant.agent.canAnswerGeneralQuestion(query) {
+            assistant.agent.submit(query, model: assistant)
+            return
+        }
         store.setPreference(\.avoidStairs, LocalNavigationAgent.constraints(for: query, base: store.preferences).avoidStairs)
         library.reload(); memory.refresh(from: library)
         if let request = RoomMappingRequest.resolve(query, selectedBuilding: selectedRoomBuilding) {
@@ -455,14 +473,48 @@ struct PlacesHomeView: View {
         guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         message = "No saved indoor room matches. Checking outdoor places; indoor guidance needs a reviewed map."
         let generation = UUID(); searchGeneration = generation; let text = query
-        Task { await outdoor.search(text); guard generation == searchGeneration else { return }; searched = true; message = outdoor.error == nil ? "Choose your destination." : "" }
+        Task {
+            await outdoor.search(text); guard generation == searchGeneration else { return }
+            // Speech can mangle names ("louis rm strng"). Try the closest saved
+            // name, then an AI spelling fix, and search once more.
+            if outdoor.results.isEmpty, outdoor.error == nil {
+                var fixed = SpokenPlaceMatch.correct(text, names: VoiceCommandInput.knownPlaces)
+                if fixed == nil { fixed = await assistant.agent.correctPlaceName(SpokenPlaceMatch.cleaned(text), known: VoiceCommandInput.knownPlaces) }
+                guard generation == searchGeneration else { return }
+                if let fixed {
+                    message = "Searching for \(fixed)…"
+                    await outdoor.search(fixed); guard generation == searchGeneration else { return }
+                    if !outdoor.results.isEmpty { store.speak("Did you mean \(fixed)? Choose it below.") }
+                }
+            }
+            searched = true; message = outdoor.error == nil ? (outdoor.results.isEmpty ? "No match. Try saying the name another way." : "Choose your destination.") : ""
+        }
     }
-    private func propose(_ item: JourneyDestination, speak: Bool = true) {
+    /// Metres from your GPS fix to where this recording starts, when both are known.
+    private func startDistance(_ item: JourneyDestination) -> Double? {
+        guard let pin = entranceLocation(item), let fix = nearby.location, fix.horizontalAccuracy >= 0 else { return nil }
+        return fix.distance(from: CLLocation(latitude: pin.latitude, longitude: pin.longitude))
+    }
+    /// A room can have recordings from several doors. Use the one that starts
+    /// nearest to you; without a good GPS fix keep the saved ranking.
+    private func nearestRecording(for item: JourneyDestination) -> JourneyDestination {
+        let options = memory.alternatives(to: item)
+        guard options.count > 1 else { return options.first ?? item }
+        let order = RouteChoice.ranked(options.map(startDistance), fixAccuracy: nearby.location?.horizontalAccuracy)
+        return options[order[0]]
+    }
+    private func propose(_ item: JourneyDestination, speak: Bool = true, choosing: Bool = true) {
         nearby.start() // so Start can decide between GPS walk and camera
+        let item = choosing ? nearestRecording(for: item) : item
+        pickedRecording = !choosing
         selectedRoomBuilding = item.building
         outdoorProposal = nil; proposal = item; confirmation.propose(item.id, now: ProcessInfo.processInfo.systemUptime)
         message = "Say yes or no, or use the buttons."
-        if speak { store.speak("I found \(item.room), \(item.building). \(floorDescription(item)). Is this where you want to go?", force: true) }
+        let ways = memory.alternatives(to: item).count
+        let start = ways <= 1 ? "" : startDistance(item) != nil
+            ? " There are \(ways) recorded ways in. The closest starts at \(memory.startingLabel(item))."
+            : " There are \(ways) recorded ways in. This one starts at \(memory.startingLabel(item))."
+        if speak { store.speak("I found \(item.room), \(item.building). \(floorDescription(item)).\(start) Is this where you want to go?", force: true) }
     }
     private func openOutdoor(_ item: MKMapItem) {
         selectedOutdoorRoom = RoomMappingRequest.resolve(query, selectedBuilding: selectedRoomBuilding)?.room
@@ -644,11 +696,13 @@ struct DestinationJourneyView: View {
     var found: (JourneyDestination) -> Void = { _ in }
     var fallback: (String) -> Void = { _ in }
     var speak: (String) -> Void = { _ in }
+    var acknowledge: () -> Void = {}
     var requestCamera: (() -> Void)?
     var floorInfo: (JourneyDestination) -> String = { _ in "Floor label unknown" }
     private var ledger = AgentExecutionLedger()
     private var utterance = ""
     func beginAgentTurn(_ text: String) { utterance = text; ledger.invalidate() }
+    func acknowledgeAgentRequest() { acknowledge() }
     func agentContext() -> AgentContext {
         AgentContext(sessionId: ledger.sessionId, sessionRevision: ledger.revision, buildingId: "not-localized", floor: nil,
             tracking: "uncertain", destinationId: "", avoidStairs: preferences.avoidStairs,
@@ -664,7 +718,13 @@ struct DestinationJourneyView: View {
             if let previous = try ledger.validate(call) { return previous }
             switch call.tool {
             case .resolveDestination:
-                let matches = DestinationSearch.matches(utterance, in: catalog)
+                var matches = DestinationSearch.matches(utterance, in: catalog)
+                // The AI may pass a repaired spelling ("Louis Armstrong" for "louis rm strng").
+                // It still has to match a saved place; the AI cannot add one.
+                if matches.count != 1, !call.argument.isEmpty {
+                    let repaired = DestinationSearch.matches(call.argument, in: catalog)
+                    if repaired.count == 1 { matches = repaired }
+                }
                 guard matches.count == 1, let destination = matches.first else {
                     fallback(utterance)
                     throw MapError.invalid(matches.isEmpty ? "No verified indoor location matches. Check the outdoor search results or choose a saved room." : "Several places match. Choose the building and room on screen.")

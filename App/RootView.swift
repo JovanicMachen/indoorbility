@@ -13,6 +13,9 @@ struct RootView: View {
             NavigationStack { SettingsView(store: store) }
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }.tag(3)
         }
+        .overlay {
+            if !highContrast { TopSnowfall().ignoresSafeArea() }
+        }
         .preferredColorScheme(.light)
         .tint(highContrast ? .primary : .indoorTeal)
         .onChange(of: phase) { _, value in if value != .active { store.stopSpeech() } }

@@ -39,7 +39,7 @@ struct GuidanceTestView: View {
             }
             Section("Production sound controls") {
                 NavigationSoundSettings(store: store)
-                Button("Repeat instruction") { if let follower { store.speak(LiveGuidance.message(follower).text) } }
+                Button("Repeat instruction") { if let follower { store.speak(LiveGuidance.message(follower).text, userRequested: true) } }
                 ForEach(GuidanceCue.allCases, id: \.rawValue) { cue in Button("Play \(cue.rawValue) cue") { store.cue(cue) } }
                 Text("Last requested speech: \(store.lastNarration)")
                 Text("Last played cue: \(store.audio.lastCue)")
@@ -79,7 +79,12 @@ struct GuidanceTestView: View {
     private func deliver() {
         guard let follower else { return }
         let message = LiveGuidance.message(follower, feet: UserDefaults.standard.bool(forKey: "guidanceFeet"))
-        if delivery.consume(message, listening: false) { store.speak(message.text); if let cue = message.cue { store.cue(cue) } }
+        if delivery.consume(message, listening: false) {
+            store.speak(message.text, priority: message.cue == .attention ? .safety : .direction,
+                        speechKey: message.id,
+                        stillRelevant: { self.follower.map { LiveGuidance.message($0, feet: UserDefaults.standard.bool(forKey: "guidanceFeet")).id } == message.id })
+            if let cue = message.cue { store.cue(cue) }
+        }
         store.updateJourneySound(active: follower.stable && follower.state == .guiding)
     }
 }

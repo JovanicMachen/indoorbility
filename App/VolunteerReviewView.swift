@@ -4,7 +4,15 @@ import simd
 import IndoorbilityCore
 
 private enum ScanPreviewStyle {
-    static let background = Color(red: 0.78, green: 0.70, blue: 0.60)
+    /// Deep plum night so the vibrant surfaces stand out.
+    static let background = Color(red: 0.13, green: 0.07, blue: 0.15)
+    /// Floors and tables vibrant green; walls pink-magenta, a little lighter
+    /// toward the ceiling so height still reads. No grey blend in between.
+    static func color(height t: Float, wall: Bool) -> SIMD3<Float> {
+        let h = max(0, min(1, t))
+        if wall { return SIMD3<Float>(0.92, 0.12, 0.56) + SIMD3<Float>(0.08, 0.22, 0.14) * h }
+        return SIMD3<Float>(0.12, 0.78, 0.36) + SIMD3<Float>(0.08, 0.17, 0.10) * h
+    }
 }
 
 extension ScanLibrary {
@@ -120,15 +128,20 @@ struct VolunteerReviewView: View {
 struct RecordedMeshPreview: UIViewRepresentable {
     let meshes: [MeshRecord]
     let rotating: Bool
+    /// Optional walked path, drawn as a glowing tube through the model.
+    var path: [SpatialPoint] = []
+    var transparentBackground = false
+    /// >1 shows more of the model (full-screen viewer is taller than the card).
+    var zoomOut: Double = 1
     func makeUIView(context: Context) -> SCNView {
         let view = SCNView()
         let scene = SCNScene()
         view.scene = scene
-        view.backgroundColor = UIColor(ScanPreviewStyle.background)
+        view.backgroundColor = transparentBackground ? .clear : UIColor(ScanPreviewStyle.background)
         view.autoenablesDefaultLighting = false
         let ambient = SCNNode(); ambient.light = SCNLight(); ambient.light?.type = .ambient
-        ambient.light?.color = UIColor(red: 1, green: 0.91, blue: 0.87, alpha: 1)
-        ambient.light?.intensity = 650; scene.rootNode.addChildNode(ambient)
+        ambient.light?.color = UIColor.white
+        ambient.light?.intensity = 800; scene.rootNode.addChildNode(ambient)
         let key = SCNNode(); key.light = SCNLight(); key.light?.type = .directional
         key.light?.intensity = 1000; key.eulerAngles = SCNVector3(-0.7, -0.6, 0)
         scene.rootNode.addChildNode(key)
@@ -151,10 +164,7 @@ struct RecordedMeshPreview: UIViewRepresentable {
                     let p = mesh.vertices[Int(mesh.triangles[triangle * 3 + offset])]
                     vertices.append(SCNVector3(p.x, p.y, p.z))
                     let height = max(0, min(1, (p.y-minY)/max(0.01, maxY-minY)))
-                    let plum = SIMD3<Float>(0.39, 0.20, 0.36)
-                    let peach = SIMD3<Float>(0.98, 0.77, 0.65)
-                    let color = plum + (peach-plum)*height
-                    colors.append(SIMD4(color.x, color.y, color.z, 1))
+                    colors.append(SIMD4(height, 0, 0, 1)) // Placeholder; coloured once the face normal is known.
                     low = SCNVector3(min(low.x,p.x), min(low.y,p.y), min(low.z,p.z))
                     high = SCNVector3(max(high.x,p.x), max(high.y,p.y), max(high.z,p.z))
                 }
@@ -162,6 +172,11 @@ struct RecordedMeshPreview: UIViewRepresentable {
                 let cross = simd_cross(SIMD3(b.x-a.x,b.y-a.y,b.z-a.z), SIMD3(c.x-a.x,c.y-a.y,c.z-a.z))
                 let normal = simd_length_squared(cross) > 0.000001 ? simd_normalize(cross) : SIMD3<Float>(0,1,0)
                 normals.append(contentsOf: Array(repeating: SCNVector3(normal.x, normal.y, normal.z), count: 3))
+                let wall = abs(normal.y) < 0.6
+                for k in (colors.count-3)..<colors.count {
+                    let c = ScanPreviewStyle.color(height: colors[k].x, wall: wall)
+                    colors[k] = SIMD4(c.x, c.y, c.z, 1)
+                }
             }
             let colorSource = SCNGeometrySource(data: colors.withUnsafeBytes { Data($0) }, semantic: .color,
                 vectorCount: colors.count, usesFloatComponents: true, componentsPerVector: 4,
@@ -171,11 +186,19 @@ struct RecordedMeshPreview: UIViewRepresentable {
             let material = SCNMaterial()
             material.diffuse.contents = UIColor.white
             material.lightingModel = .physicallyBased
-            material.roughness.contents = 0.85
-            material.metalness.contents = 0.08
+            material.roughness.contents = 0.55
+            material.metalness.contents = 0.05
+            material.emission.contents = UIColor(white: 0.12, alpha: 1) // Keeps colours bright in shadow.
             material.isDoubleSided = true
             geometry.materials = [material]
             model.addChildNode(SCNNode(geometry: geometry))
+        }
+        if let walked = ScanModelPath.node(path) {
+            model.addChildNode(walked)
+            for p in path {
+                low = SCNVector3(min(low.x,p.x), min(low.y,p.y), min(low.z,p.z))
+                high = SCNVector3(max(high.x,p.x), max(high.y,p.y), max(high.z,p.z))
+            }
         }
         let center = SCNVector3((low.x+high.x)/2, (low.y+high.y)/2, (low.z+high.z)/2)
         model.position = SCNVector3(-center.x, -center.y, -center.z)
@@ -184,7 +207,7 @@ struct RecordedMeshPreview: UIViewRepresentable {
         scene.rootNode.addChildNode(orbit)
         let camera = SCNNode(); camera.camera = SCNCamera()
         camera.camera?.usesOrthographicProjection = true
-        camera.camera?.orthographicScale = Double(radius * 1.25)
+        camera.camera?.orthographicScale = Double(radius * 1.25) * zoomOut
         camera.camera?.zFar = Double(radius * 10 + 100)
         camera.position = SCNVector3(0, radius * 1.2, radius * 2.5)
         camera.look(at: SCNVector3Zero)
@@ -302,5 +325,182 @@ struct MeshGalleryView: View {
             .clipShape(RoundedRectangle(cornerRadius: 28))
             .overlay(RoundedRectangle(cornerRadius: 28).stroke(Color.indoorTeal.opacity(0.1), lineWidth: 1))
             .onAppear { visible = true }.onDisappear { visible = false }
+    }
+}
+
+/// The walked route as a glowing cyan tube with a green start and gold end
+/// stop. Down-sampled so long walks stay cheap to draw.
+enum ScanModelPath {
+    static func node(_ path: [SpatialPoint]) -> SCNNode? {
+        let points = path.filter(\.isFinite)
+        guard points.count >= 2 else { return nil }
+        let step = max(1, points.count / 160)
+        var kept = stride(from: 0, to: points.count, by: step).map { points[$0] }
+        if kept.last != points.last { kept.append(points.last!) }
+        let root = SCNNode()
+        let glow = SCNMaterial()
+        glow.diffuse.contents = UIColor(red: 0.30, green: 0.95, blue: 1.0, alpha: 1)
+        glow.emission.contents = UIColor(red: 0.20, green: 0.85, blue: 1.0, alpha: 1)
+        glow.lightingModel = .constant
+        for (a, b) in zip(kept, kept.dropFirst()) {
+            let va = SIMD3<Float>(a.x, a.y, a.z), vb = SIMD3<Float>(b.x, b.y, b.z)
+            let length = simd_distance(va, vb)
+            guard length > 0.01 else { continue }
+            let tube = SCNCylinder(radius: 0.06, height: CGFloat(length)); tube.radialSegmentCount = 8
+            tube.materials = [glow]
+            let segment = SCNNode(geometry: tube)
+            segment.simdPosition = (va + vb) / 2
+            // SCNCylinder runs along +Y; turn it to point from a to b.
+            segment.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: simd_normalize(vb - va))
+            root.addChildNode(segment)
+        }
+        func marker(_ p: SpatialPoint, _ color: UIColor) -> SCNNode {
+            let sphere = SCNSphere(radius: 0.22); let m = SCNMaterial()
+            m.diffuse.contents = color; m.emission.contents = color; m.lightingModel = .constant
+            sphere.materials = [m]
+            let node = SCNNode(geometry: sphere); node.simdPosition = SIMD3(p.x, p.y, p.z); return node
+        }
+        root.addChildNode(marker(kept[0], UIColor(red: 0.25, green: 0.95, blue: 0.45, alpha: 1)))
+        root.addChildNode(marker(kept[kept.count-1], UIColor(red: 1.0, green: 0.80, blue: 0.20, alpha: 1)))
+        return root
+    }
+}
+
+/// Every saved scan as a real 3D model, on a deep night-sky backdrop.
+struct ScanModelGalleryView: View {
+    @ObservedObject var library: ScanLibrary
+    var body: some View {
+        ZStack {
+            ScanModelBackdrop()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Your 3D spaces").font(.largeTitle.bold()).foregroundStyle(.white)
+                    Text("Every LiDAR recording as a model you can spin, drag and pinch. The glowing line is the path you walked.")
+                        .font(.subheadline).foregroundStyle(.white.opacity(0.75))
+                    if library.scans.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: "cube.transparent").font(.system(size: 44)).foregroundStyle(.white.opacity(0.8))
+                            Text("No 3D scans yet").font(.headline).foregroundStyle(.white)
+                            Text("Record a route and its space is saved here.").font(.footnote).foregroundStyle(.white.opacity(0.7))
+                        }.frame(maxWidth: .infinity).padding(.vertical, 60)
+                    }
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
+                        ForEach(library.scans) { draft in
+                            NavigationLink { ScanModelViewer(library: library, draft: draft) } label: { card(draft) }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("3D model of \(title(draft))")
+                        }
+                    }
+                }.padding(20)
+            }
+        }.navigationTitle("3D models").navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .swipeLeftToGoBack()
+            .onAppear { library.reload() }
+    }
+    private func title(_ draft: ScanDraft) -> String {
+        if let route = try? library.hallway(draft) { return route.entrance.label + " → " + route.room.label }
+        return draft.name
+    }
+    private func card(_ draft: ScanDraft) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ZStack {
+                LinearGradient(colors: [Color(red: 0.92, green: 0.12, blue: 0.56).opacity(0.55), Color(red: 0.12, green: 0.78, blue: 0.36).opacity(0.45)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: "cube.transparent.fill").font(.system(size: 40, weight: .light)).foregroundStyle(.white)
+                    .shadow(color: .white.opacity(0.6), radius: 10)
+            }.frame(height: 110).clipShape(RoundedRectangle(cornerRadius: 18))
+            Text(title(draft)).font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(2)
+            Text(draft.name + " · " + draft.createdAt.formatted(date: .abbreviated, time: .omitted))
+                .font(.caption).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
+        }.padding(10)
+            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 22))
+            .overlay(RoundedRectangle(cornerRadius: 22).stroke(.white.opacity(0.14), lineWidth: 1))
+    }
+}
+
+/// One scan, full screen: the saved surfaces plus the walked path.
+struct ScanModelViewer: View {
+    @ObservedObject var library: ScanLibrary
+    let draft: ScanDraft
+    @State private var meshes: [MeshRecord] = []
+    @State private var loading = true
+    @State private var error: String?
+    @State private var spinning = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var phase
+    private var path: [SpatialPoint] {
+        if let route = try? library.hallway(draft) { return route.path }
+        return draft.samples.map(\.position)
+    }
+    var body: some View {
+        ZStack {
+            ScanModelBackdrop()
+            if !meshes.isEmpty {
+                RecordedMeshPreview(meshes: meshes, rotating: spinning && !reduceMotion && phase == .active, path: path, transparentBackground: true, zoomOut: 1.9)
+                    .ignoresSafeArea(edges: .bottom)
+                    .accessibilityLabel("Three-dimensional model of the scanned space with the walked path")
+            } else if loading {
+                ProgressView("Building your 3D model…").tint(.white).foregroundStyle(.white)
+            } else {
+                VStack(spacing: 10) {
+                    Image(systemName: "cube.transparent").font(.largeTitle)
+                    Text("3D model unavailable").font(.headline)
+                    Text(error ?? "No surfaces were saved.").font(.caption).opacity(0.7)
+                }.foregroundStyle(.white)
+            }
+            VStack {
+                Spacer()
+                HStack(spacing: 14) {
+                    legend(Color(red: 0.25, green: 0.95, blue: 0.45), "Start")
+                    legend(Color(red: 0.30, green: 0.95, blue: 1.0), "Path")
+                    legend(Color(red: 1.0, green: 0.80, blue: 0.20), "End stop")
+                    Spacer()
+                    if !reduceMotion {
+                        Button { spinning.toggle() } label: {
+                            Image(systemName: spinning ? "pause.fill" : "rotate.3d").frame(width: 44, height: 44)
+                        }.foregroundStyle(.white).background(.white.opacity(0.15), in: Circle())
+                            .accessibilityLabel(spinning ? "Stop spinning and explore" : "Spin model")
+                    }
+                }.padding(14).background(.ultraThinMaterial.opacity(0.6), in: RoundedRectangle(cornerRadius: 20))
+                    .environment(\.colorScheme, .dark)
+                    .padding(16)
+            }
+        }.navigationTitle(draft.name).navigationBarTitleDisplayMode(.inline)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .swipeLeftToGoBack()
+            .task(id: draft.id) {
+                loading = true
+                do { meshes = try await SavedMeshLoader.load(library.directory(draft.id).appending(path: "mesh.json")) }
+                catch { self.error = error.localizedDescription }
+                loading = false
+            }
+    }
+    private func legend(_ color: Color, _ text: String) -> some View {
+        HStack(spacing: 6) { Circle().fill(color).frame(width: 10, height: 10); Text(text).font(.caption.weight(.medium)) }
+            .foregroundStyle(.white)
+    }
+}
+
+/// Night-sky gradient with soft glows and still stars. Static, so it costs nothing.
+struct ScanModelBackdrop: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [Color(red: 0.07, green: 0.04, blue: 0.14), Color(red: 0.16, green: 0.06, blue: 0.20), Color(red: 0.03, green: 0.12, blue: 0.16)],
+                           startPoint: .top, endPoint: .bottom)
+            RadialGradient(colors: [Color(red: 0.92, green: 0.12, blue: 0.56).opacity(0.30), .clear], center: .topTrailing, startRadius: 10, endRadius: 380)
+            RadialGradient(colors: [Color(red: 0.12, green: 0.78, blue: 0.56).opacity(0.25), .clear], center: .bottomLeading, startRadius: 10, endRadius: 420)
+            Canvas { context, size in
+                var seed: UInt64 = 0x5EED
+                for _ in 0..<70 {
+                    seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                    let x = CGFloat(seed >> 33 % 10000) / 10000 * size.width
+                    seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                    let y = CGFloat(seed >> 33 % 10000) / 10000 * size.height
+                    let r = CGFloat(seed % 3) * 0.5 + 0.6
+                    context.fill(Path(ellipseIn: CGRect(x: x, y: y, width: r, height: r)), with: .color(.white.opacity(0.5)))
+                }
+            }
+        }.ignoresSafeArea().accessibilityHidden(true)
     }
 }

@@ -124,15 +124,16 @@ final class LiveGuidanceTests: XCTestCase {
         XCTAssertEqual(turns.count, 1)
         XCTAssertEqual(turns.first?.direction, "around")
     }
-    func testNewDirectionsInterruptOldDirectionsButNotSafety() {
+    func testOnlySafetyInterruptsAnOrdinarySentence() {
         let old = PendingSpeech("In 10 meters, turn left", priority: .direction, now: 0)
         let turn = PendingSpeech("Turn left now", priority: .direction, now: 2)
         let safety = PendingSpeech("Position uncertain", priority: .safety, now: 2)
-        XCTAssertTrue(NavigationSpeechQueue.shouldInterrupt(active: old, incoming: turn))
-        XCTAssertTrue(NavigationSpeechQueue.shouldInterrupt(active: PendingSpeech("Cloud response", priority: .routine, now: 1), incoming: turn))
+        XCTAssertFalse(NavigationSpeechQueue.shouldInterrupt(active: old, incoming: turn))
+        XCTAssertFalse(NavigationSpeechQueue.shouldInterrupt(active: PendingSpeech("Cloud response", priority: .routine, now: 1), incoming: turn))
         XCTAssertTrue(NavigationSpeechQueue.shouldInterrupt(active: old, incoming: safety))
         XCTAssertFalse(NavigationSpeechQueue.shouldInterrupt(active: safety, incoming: turn))
         XCTAssertFalse(NavigationSpeechQueue.shouldInterrupt(active: turn, incoming: turn))
+        XCTAssertFalse(NavigationSpeechQueue.shouldInterrupt(active: safety, incoming: PendingSpeech("Possible obstacle", priority: .safety, now: 3)))
     }
     func testMuteOverridesForcedSpeechAndCues() {
         XCTAssertFalse(GuidanceSoundPolicy.speechAllowed(muted: true, enabled: true, forced: true, voiceOver: true, active: true, suspended: false))
@@ -189,7 +190,7 @@ final class LiveGuidanceTests: XCTestCase {
         XCTAssertTrue(spoken.contains("Continue straight. In 20 meters, turn left."))
         XCTAssertEqual(spoken.filter { $0 == "Turn left now." }.count, 1)
         XCTAssertEqual(spoken.filter { $0 == "Turn right now." }.count, 1)
-        XCTAssertThrowsError(try f.confirmArrival())
+        // Walking onto the end stop is the arrival; no label reading is required.
         for _ in 0...25 { time += 0.1; f.update(position: path.last!, heading: 0, time: time, trackingNormal: true) }
         try f.confirmArrival()
         XCTAssertEqual(LiveGuidance.message(f).cue, .arrived)

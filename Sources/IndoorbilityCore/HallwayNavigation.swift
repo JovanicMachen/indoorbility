@@ -28,6 +28,27 @@ public struct ScanAlignment: Codable, Equatable {
         return ScanAlignment(yaw: yaw, translation: SpatialPoint(x: ((savedA.x-a.x)+(savedB.x-b.x))/2,
             y: ((savedA.y-a.y)+(savedB.y-b.y))/2, z: ((savedA.z-a.z)+(savedB.z-b.z))/2))
     }
+    /// "I'm at the start": place the walker on the recorded start, facing the
+    /// way the recording begins. No saved-map match or landmark is required;
+    /// live LiDAR tracking then measures every step from here.
+    public static func startingHere(livePosition: SpatialPoint, liveHeading: Float, path: [SpatialPoint]) throws -> Self {
+        guard livePosition.isFinite, liveHeading.isFinite, let start = path.first else {
+            throw MapError.invalid("Hold the phone up and let tracking settle, then try again.")
+        }
+        let baseline: Float = 3
+        guard let ahead = path.first(where: { $0.horizontalDistance(to: start) >= 1 }) else {
+            throw MapError.invalid("This recording is too short to start from here.")
+        }
+        let length = ahead.horizontalDistance(to: start)
+        let savedB = SpatialPoint(x: start.x + (ahead.x-start.x)/length*baseline, y: start.y,
+                                  z: start.z + (ahead.z-start.z)/length*baseline)
+        let liveB = SpatialPoint(x: livePosition.x + cos(liveHeading)*baseline, y: livePosition.y,
+                                 z: livePosition.z + sin(liveHeading)*baseline)
+        let fitted = try fit(liveA: livePosition, liveB: liveB, savedA: start, savedB: savedB)
+        // Height comes from the recording start, not an averaged baseline.
+        return ScanAlignment(yaw: fitted.yaw, translation: SpatialPoint(x: fitted.translation.x,
+            y: start.y - livePosition.y, z: fitted.translation.z))
+    }
 }
 
 public struct HallwayRoute: Codable, Identifiable, Equatable {
@@ -81,8 +102,9 @@ public struct HallwayRoute: Codable, Identifiable, Equatable {
               draft.samples[a].position.distance(to: entrance.position) < 1,
               draft.samples[b].position.distance(to: room.position) < 1 else { throw MapError.invalid("Mark both endpoints while standing on the recorded path, at least two metres apart.") }
         let samples = Array(draft.samples[min(a,b)...max(a,b)])
-        guard Set(samples.map(\.segment)).count == 1 else { throw MapError.invalid("Tracking was lost along this hallway. Rescan it continuously; gaps cannot become routes.") }
-        let ordered = a < b ? samples.map(\.position) : samples.reversed().map(\.position)
+        // Short tracking dropouts are bridged; only a real jump rejects the walk.
+        let bridged = try TraceGaps.bridge(samples)
+        let ordered = a < b ? bridged : bridged.reversed()
         var path = [entrance.position]
         for p in ordered.dropFirst().dropLast() where p.distance(to: path.last!) > 0.15 { path.append(p) }
         if path.count > 1 && path.last!.distance(to: room.position) < 0.15 { path.removeLast() }
@@ -112,6 +134,10 @@ public struct HallwayFollower {
     /// already in map coordinates. The follower then places you anywhere on the path,
     /// starts and recovers by itself, and announces arrival — like a normal GPS.
     public private(set) var localized = false
+    /// Started at the recorded start without a map match. The facing direction
+    /// sets the frame once; then guidance follows forgivingly, like GPS mode,
+    /// placing you anywhere along the path toward the recorded end stop.
+    public private(set) var forgiving = false
     private var offPathSide: String?
     private var lostSince: TimeInterval?
     private var movementAnchor: SpatialPoint?
@@ -213,12 +239,19 @@ public struct HallwayFollower {
     /// Switch to GPS mode once the saved map is matched (alignment becomes identity).
     public mutating func setLocalized() {
         guard !localized else { return }
-        localized = true; alignment = .identity; confirmed = false; stableSince = nil; lostSince = nil
+        localized = true; forgiving = false; alignment = .identity; confirmed = false; stableSince = nil; lostSince = nil
         previousTime = nil; previousPose = nil; offSince = nil; retreatSince = nil; arrivalSince = nil
         if state != .arrived { state = .locating; instruction = "Map matched. Finding your place on the path." }
     }
+    public mutating func followFromStart(using alignment: ScanAlignment) {
+        forgiving = true; self.alignment = alignment
+        confirmed = true; progress = 0; remaining = totalDistance
+        previousTime = nil; previousPose = nil; offSince = nil; retreatSince = nil; arrivalSince = nil; lostSince = nil
+        movementAnchor = nil; movementHeading = nil; offPathSide = nil
+        if state != .arrived { state = .guiding; instruction = "Continue straight." }
+    }
     public mutating func update(position live: SpatialPoint?, heading: Float?, time: TimeInterval, trackingNormal: Bool, routeAvailable: Bool = true) {
-        if localized { updateLocalized(position: live, heading: heading, time: time, trackingNormal: trackingNormal, routeAvailable: routeAvailable); return }
+        if localized || forgiving { updateLocalized(position: live, heading: heading, time: time, trackingNormal: trackingNormal, routeAvailable: routeAvailable); return }
         guard routeAvailable else { invalidate("This hallway is reported closed. No alternative has been mapped."); state = .blocked; return }
         guard trackingNormal, let live, live.isFinite, heading.map({ $0.isFinite }) ?? true, time.isFinite else { invalidate(); return }
         if let prior = previousTime, time <= prior || time-prior > 0.8 { invalidate("Tracking was interrupted. Confirm a landmark to continue.") }
@@ -256,9 +289,9 @@ public struct HallwayFollower {
         }
         retreatSince = nil
         progress = max(progress, projection.along); remaining = max(0, totalDistance-progress)
-        if remaining < 1 && p.distance(to: route.room.position) <= 0.8 {
+        if EndStop.reached(remaining: remaining, distance: p.horizontalDistance(to: route.room.position)) {
             if arrivalSince == nil { arrivalSince = time }
-            if time - (arrivalSince ?? time) >= 2 { state = .nearRoom; instruction = "At \(route.room.label). Check the room label to confirm arrival."; return }
+            if time - (arrivalSince ?? time) >= EndStop.dwell { state = .nearRoom; instruction = "You’re at \(route.room.label). Stop here."; return }
         } else { arrivalSince = nil }
         state = .guiding
         let target = point(at: min(totalDistance, progress+3))
@@ -332,9 +365,9 @@ public struct HallwayFollower {
         offSince = nil; offPathSide = nil
         if !confirmed { confirmed = true; retreatSince = nil }
         progress = projection.along; remaining = max(0, totalDistance-progress)
-        if remaining < 1.5 && p.horizontalDistance(to: route.room.position) <= 1.5 {
+        if EndStop.reached(remaining: remaining, distance: p.horizontalDistance(to: route.room.position)) {
             if arrivalSince == nil { arrivalSince = time }
-            if time - (arrivalSince ?? time) >= 1 {
+            if time - (arrivalSince ?? time) >= EndStop.dwell {
                 state = .arrived; progress = totalDistance; remaining = 0
                 instruction = "You have arrived at \(route.room.label)."; return
             }
@@ -368,8 +401,8 @@ public struct HallwayFollower {
         return delta > 0 ? "to your right" : "to your left"
     }
     public mutating func confirmArrival() throws {
-        guard state == .nearRoom, stable, let p = position, p.distance(to: route.room.position) <= 0.8 else {
-            throw MapError.invalid("Arrival needs stable tracking near the room and confirmation of its label.")
+        guard state == .nearRoom, stable, let p = position, p.horizontalDistance(to: route.room.position) <= EndStop.radius else {
+            throw MapError.invalid("Arrival needs stable tracking at the recorded end stop.")
         }
         state = .arrived; instruction = "Arrival confirmed at \(route.room.label)."; progress = totalDistance; remaining = 0
     }
@@ -377,10 +410,10 @@ public struct HallwayFollower {
     /// the destination's identity; callers must not record a verified room visit.
     public mutating func finishRecordedRoute(positionVerified: Bool) throws {
         guard positionVerified, state == .nearRoom, stable, let p = position,
-              p.distance(to: route.room.position) <= 0.8 else {
+              p.horizontalDistance(to: route.room.position) <= EndStop.radius else {
             throw MapError.invalid("Match your position near the recorded endpoint first.")
         }
-        state = .arrived; instruction = "You’ve arrived at the recorded endpoint."
+        state = .arrived; instruction = "You’ve arrived at \(route.room.label)."
         progress = totalDistance; remaining = 0
     }
     private func point(at along: Float) -> SpatialPoint {
@@ -451,5 +484,58 @@ public extension HallwayFollower {
         result.previousTime = previousTime; result.previousPose = previousPose
         result.instruction = "Route changed to \(target.label). Follow the mapped hallway."
         return result
+    }
+}
+
+
+/// The destination is wherever the recorder pressed Stop: a door, an open
+/// area, a desk or any object. Arrival is the measured end stop itself, with a
+/// relaxed radius and a short dwell. No room sign or label reading is needed.
+public enum EndStop {
+    /// Horizontal metres from the recorded end stop (about 5 ft).
+    public static let radius: Float = 1.5
+    /// Seconds the walker must stay inside the radius.
+    public static let dwell: Double = 1
+    public static func reached(remaining: Float, distance: Float) -> Bool {
+        remaining.isFinite && distance.isFinite && remaining < radius && distance <= radius
+    }
+}
+
+
+/// ARKit briefly drops to limited tracking when the phone moves fast or sees a
+/// blank wall. The recorder keeps walking, so the samples after the dropout
+/// usually continue close to where they stopped. Bridge those short gaps with a
+/// straight line instead of discarding the whole walk; reject only gaps that
+/// look like a real jump (too far, or a different floor height).
+public enum TraceGaps {
+    /// Largest horizontal gap that is bridged (about 10 ft).
+    public static let maxGap: Float = 3
+    /// Largest height change across a gap (phone height wobble, not a floor change).
+    public static let maxRise: Float = 0.5
+    public static func bridge(_ samples: [ScanSample]) throws -> [SpatialPoint] {
+        guard let first = samples.first else { return [] }
+        var points = [first.position]
+        for (previous, next) in zip(samples, samples.dropFirst()) {
+            if previous.segment != next.segment {
+                let gap = previous.position.horizontalDistance(to: next.position)
+                let rise = abs(next.position.y - previous.position.y)
+                guard gap <= maxGap, rise <= maxRise else {
+                    let feet = Int((gap * 3.28084).rounded())
+                    throw MapError.invalid("Tracking dropped and your position jumped about \(feet) ft. Record this route again, walking a little slower with the camera on the walls ahead.")
+                }
+                // Fill the gap every half metre so the route stays continuous.
+                let steps = Int((gap / 0.5).rounded(.up))
+                if steps > 1 {
+                    for k in 1..<steps {
+                        let t = Float(k) / Float(steps)
+                        points.append(SpatialPoint(x: previous.position.x + (next.position.x - previous.position.x) * t,
+                                                   y: previous.position.y + (next.position.y - previous.position.y) * t,
+                                                   z: previous.position.z + (next.position.z - previous.position.z) * t))
+                    }
+                }
+            }
+            points.append(next.position)
+        }
+        return points
     }
 }

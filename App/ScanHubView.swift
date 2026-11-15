@@ -58,6 +58,13 @@ struct ScanHubView: View {
             if let error = library.error { Text(error).foregroundStyle(.red) }
             if let deletionError { Text(deletionError).foregroundStyle(.red) }
         }.navigationTitle("Routes").navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    NavigationLink { ScanModelGalleryView(library: library) } label: {
+                        Image(systemName: "cube.transparent.fill").font(.title3)
+                    }.accessibilityLabel("3D models").accessibilityIdentifier("open3DModels")
+                }
+            }
             .onAppear(perform: refresh)
             .fullScreenCover(item: $navigationTarget, onDismiss: refresh) { target in
                 NavigationStack { DestinationJourneyView(target: target, settings: store, automaticallyStart: true) }

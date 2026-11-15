@@ -27,6 +27,9 @@ struct RememberRouteView: View {
     @State private var testRoute = false
     @State private var diagnostics = false
     @State private var editDestination = false
+    @State private var coach = ScanCoach()
+    @State private var coachTip: ScanCoach.Tip?
+    @State private var lastTrackingWarning = -Double.infinity
     @Environment(\.scenePhase) private var phase
     @Environment(\.dismiss) private var dismiss
     private var onFinished: (() -> Void)?
@@ -43,20 +46,16 @@ struct RememberRouteView: View {
     }
     init(settings: AppStore, knownRoom: FriendCenter.Room? = nil, requestedRoom: RoomMappingRequest? = nil, onFinished: (() -> Void)? = nil) {
         self.settings = settings; self.onFinished = onFinished
-        _editDestination = State(initialValue: requestedRoom == nil && knownRoom == nil)
+        _editDestination = State(initialValue: false)
         _building = State(initialValue: requestedRoom?.building ?? (knownRoom == nil ? "" : FriendCenter.name))
         _room = State(initialValue: requestedRoom.map { "Room " + $0.room } ?? knownRoom.map { "Room " + $0.id } ?? "")
         _floorLabel = State(initialValue: requestedRoom?.verifiedFloor ?? knownRoom?.level ?? "")
     }
-    private var startField: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("From (optional name)").font(.headline)
-            TextField("For example, main elevator", text: $entrance)
-                .accessibilityLabel("Start location")
-        }
-    }
     var body: some View {
-        Group {
+        // A ZStack always has a background, so the camera cover below stays
+        // attached while recording (an empty Group dropped it: blank screen).
+        ZStack {
+            Color.indoorBackground.ignoresSafeArea()
             if let completed {
                 ScrollView {
                 VStack(spacing: 22) {
@@ -83,60 +82,87 @@ struct RememberRouteView: View {
                 }.background(Color.indoorBackground)
             } else if stage == 0 {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 22) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Record a route").font(.largeTitle.bold())
-                            Text("Link two places in the same building.").foregroundStyle(.secondary)
+                            Text("Stand where you’re starting. Then walk to where you want to go.")
+                                .font(.title3).foregroundStyle(.secondary)
                         }
-                        VStack(alignment: .leading, spacing: 14) {
-                            if building.isEmpty || room.isEmpty || editDestination {
+                        // The one thing to fill in.
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Where are you going?").font(.title2.bold())
+                            TextField("Room, area or object", text: $room)
+                                .font(.title3).padding(16)
+                                .background(Color.indoorCard, in: RoundedRectangle(cornerRadius: 18))
+                                .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Color.indoorTeal.opacity(0.25)))
+                                .submitLabel(.go)
+                                .accessibilityIdentifier("Room or destination")
+                            Text("For example: Room 006, the lounge, the coffee machine.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                        // Building in one line; change only if needed.
+                        if editDestination {
+                            VStack(alignment: .leading, spacing: 8) {
                                 Text("Building").font(.headline)
-                                TextField("Building name", text: $building)
+                                TextField("Building name", text: $building).textFieldStyle(.roundedBorder)
                                 if !savedBuildings.isEmpty {
                                     Menu("Use saved building") {
-                                        ForEach(savedBuildings, id: \.self) { name in Button(name) { building = name } }
-                                    }
-                                }
-                                startField
-                                Text("To").font(.headline)
-                                TextField("Room or destination", text: $room)
-                            } else {
-                                HStack(alignment: .top) {
-                                    Image(systemName: "mappin.circle.fill").font(.title2).foregroundStyle(Color.indoorTeal)
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(room).font(.title3.bold())
-                                        Text(building).font(.subheadline).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Button("Edit") { editDestination = true }.font(.subheadline)
+                                        ForEach(savedBuildings, id: \.self) { name in Button(name) { building = name; editDestination = false } }
+                                    }.font(.subheadline)
                                 }
                             }
-                            Divider()
-                            if !editDestination && !building.isEmpty && !room.isEmpty { startField }
-                            if !entrance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                               entrance.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(room.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame {
-                                Text("Choose different start and destination names.").font(.footnote)
-                            }
-                            DisclosureGroup("Optional details") {
-                                TextField("Floor label (optional)", text: $floorLabel)
-                                    .accessibilityIdentifier("Floor label (confirm from building signage)")
-                            }
-                        }.textFieldStyle(.roundedBorder).padding(20)
-                            .background(Color.indoorCard, in: RoundedRectangle(cornerRadius: 24))
+                        } else {
+                            HStack {
+                                Label(building, systemImage: "building.2").font(.headline).lineLimit(1)
+                                Spacer()
+                                Button("Change") { editDestination = true }.font(.subheadline)
+                                    .accessibilityLabel("Change building")
+                            }.padding(14).background(Color.indoorCard, in: RoundedRectangle(cornerRadius: 16))
+                        }
                         Button {
                             building = building.trimmingCharacters(in: .whitespacesAndNewlines)
                             room = room.trimmingCharacters(in: .whitespacesAndNewlines)
                             entrance = startingLabel
                             stage = 1; error = nil; capturedDraft = nil; scanning = true
                         } label: {
-                            Text("Start recording").font(.headline).frame(maxWidth: .infinity, minHeight: 48)
+                            Label("Start recording", systemImage: "record.circle")
+                                .font(.title3.bold()).frame(maxWidth: .infinity, minHeight: 56)
                         }.buttonStyle(.borderedProminent).controlSize(.large)
                             .disabled(!SpatialSession.supportsLiDAR || !labelsValid)
-                        Text(SpatialSession.supportsLiDAR ? "Stand at your starting landmark, then record your walk." : "Recording requires a LiDAR-equipped iPhone or iPad.")
-                            .font(.footnote).foregroundStyle(.secondary)
+                        if !SpatialSession.supportsLiDAR {
+                            Text("Recording needs an iPhone or iPad with LiDAR.").font(.footnote).foregroundStyle(.secondary)
+                        }
+                        DisclosureGroup("More options") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                TextField("Name the start (optional)", text: $entrance)
+                                    .accessibilityIdentifier("Start location")
+                                TextField("Floor (optional)", text: $floorLabel)
+                                    .accessibilityIdentifier("Floor label (confirm from building signage)")
+                                if !entrance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                                   entrance.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(room.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame {
+                                    Text("The start and destination need different names.").font(.footnote)
+                                }
+                            }.textFieldStyle(.roundedBorder).padding(.top, 8)
+                        }.tint(.indoorTeal)
                     }.padding(24)
                 }.scrollDismissesKeyboard(.interactively).background(Color.indoorBackground)
+                    .onAppear {
+                        // Most people record in the same building again: preselect it.
+                        if building.isEmpty, let recent = library.scans.first?.name { building = recent }
+                        // No building yet: keep the field open while typing.
+                        if building.isEmpty { editDestination = true }
+                    }
 
+            } else {
+                // Recording is in progress (or its camera was closed by the system).
+                VStack(spacing: 18) {
+                    Image(systemName: "record.circle").font(.system(size: 52)).foregroundStyle(Color.indoorTeal)
+                    Text("Recording to \(room)").font(.title2.bold()).multilineTextAlignment(.center)
+                    Button("Open camera") { scanning = true }
+                        .buttonStyle(.borderedProminent).controlSize(.large)
+                        .accessibilityIdentifier("reopenRecordingCamera")
+                    Button("Start over") { stage = 0; capturedDraft = nil; camera.stop() }
+                }.padding(28)
             }
         }.navigationTitle(completed == nil ? "Trace route" : "Saved").navigationBarTitleDisplayMode(.inline)
             .fullScreenCover(isPresented: $scanning) { captureScreen }
@@ -168,7 +194,7 @@ struct RememberRouteView: View {
                     ScanInstructionHeading(
                         status: saving ? "Saving…" : stage == 3 ? "Recording complete" : camera.running ? (camera.meshCount > 0 ? "Mapping your surroundings" : "Finding surfaces…") : "Camera paused",
                         title: stage == 1 ? "Start at \(entrance)" : stage == 2 ? "Walk to \(room)" : "Save this route?",
-                        instruction: stage == 1 ? "Gently look around, then tap Start here." : stage == 2 ? "Keep the camera ahead; finish when you reach the room." : "Your path and 3D map will be saved together.",
+                        instruction: stage == 1 ? "Gently look around, then tap Start here." : stage == 2 ? "Keep the camera ahead. When you reach the spot, stand where people should stop and tap Stop here." : "Your path and 3D map will be saved together.",
                         active: camera.running && stage < 3
                     )
                     if !camera.running && capturedDraft == nil {
@@ -178,7 +204,9 @@ struct RememberRouteView: View {
                             Task { await camera.start(); location.start() }
                         }.buttonStyle(.borderedProminent)
                     } else if camera.position == nil && capturedDraft == nil {
-                        Text("Hold still and point at a textured wall until tracking returns.").font(.headline)
+                        Label(camera.trackingTip ?? "Hold still and point at a textured wall until tracking returns.", systemImage: "exclamationmark.triangle.fill")
+                            .font(.headline).foregroundStyle(Color(red: 0.62, green: 0.20, blue: 0.20))
+                            .accessibilityIdentifier("recordingTrackingTip")
                     } else if stage == 1 {
                         Button("Start here") {
                             camera.mark(entrance)
@@ -187,14 +215,25 @@ struct RememberRouteView: View {
                                     ? EntranceLocation(latitude: fix.coordinate.latitude, longitude: fix.coordinate.longitude, accuracy: fix.horizontalAccuracy, confirmedAt: Date()) : nil
                             }
                             location.stop(); stage = 2
-                            settings.speak("Start confirmed. Walk the known hallway to \(room).")
+                            if settings.preferences.haptics { AppHaptics.shared.success() }
+                            coach = ScanCoach(); coachTip = nil
+                            settings.speak("Start confirmed. Walk to \(room). Slow down at corners and sweep the phone across them.")
                         }.buttonStyle(.borderedProminent).disabled(camera.meshCount == 0)
                     } else if stage == 2 {
-                        Button("Mark shared landmark") { markingLandmark = true }.font(.footnote)
-                        Button("Finish recording") {
-                            camera.mark(room); stage = 3
-                            settings.speak("Recording complete. Tap Save route.", force: true)
+                        if let coachTip {
+                            Label(coachTip.text, systemImage: coachTip.symbol)
+                                .font(.headline).foregroundStyle(Color.indoorTeal)
+                                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.indoorPeach.opacity(0.25), in: RoundedRectangle(cornerRadius: 16))
+                                .accessibilityIdentifier("scanCoachTip")
+                                .transition(.opacity)
                         }
+                        Button("Mark shared landmark") { markingLandmark = true }.font(.footnote)
+                        Button("Stop here · this is \(room)") {
+                            camera.mark(room); stage = 3
+                            if settings.preferences.haptics { AppHaptics.shared.success() }
+                            settings.speak("End stop set. Tap Save route.", force: true)
+                        }.accessibilityIdentifier("stopHereEndStop")
                             .buttonStyle(.borderedProminent)
                     } else {
                         Text(room).font(.headline)
@@ -212,19 +251,37 @@ struct RememberRouteView: View {
                             }
                         }.disabled(saving)
                         }
-                        if capturedDraft == nil && !camera.canSave { Text("Look around the doorway for more detail.").font(.caption) }
+                        if capturedDraft == nil && !camera.canSave { Text("Slowly look around this spot for more detail.").font(.caption) }
                     }
                     if let error { Text(error).foregroundStyle(.red) }
                 }.controlSize(.large).tint(.indoorTeal)
             }
         }.overlay { VoiceEdgeGlow(active: confirmationVoice.listening) }.interactiveDismissDisabled(saving)
             .task { location.start(); await camera.start() }
+            .onChange(of: camera.position) { _, position in
+                guard stage == 2, let position, !saving else { return }
+                guard let tip = coach.update(x: position.x, z: position.z, time: ProcessInfo.processInfo.systemUptime, meshCount: camera.meshCount) else { return }
+                withAnimation(.easeInOut(duration: 0.25)) { coachTip = tip }
+                if settings.preferences.haptics {
+                    if tip.kind == .corner { AppHaptics.shared.pattern([0, 0.15], intensity: 0.9, sharpness: 0.6) }
+                    else if tip.kind == .cornerDone { AppHaptics.shared.success() }
+                }
+                if tip.speak { settings.speak(tip.text) }
+            }
+            .onChange(of: camera.trackingTip) { _, tip in
+                // Say it the moment tracking drops so the walk can be kept clean.
+                let now = ProcessInfo.processInfo.systemUptime
+                guard stage == 2, let tip, !saving, now - lastTrackingWarning >= 5 else { return }
+                lastTrackingWarning = now
+                if settings.preferences.haptics { AppHaptics.shared.pattern([0, 0.12, 0.24], intensity: 1, sharpness: 0.8) }
+                settings.speak(tip, priority: .safety)
+            }
             .onChange(of: location.location) { _, fix in
                 guard stage == 1, let fix, fix.horizontalAccuracy >= 0 else { return }
                 if bestStartFix.map({ fix.horizontalAccuracy <= $0.horizontalAccuracy || abs($0.timestamp.timeIntervalSinceNow) > 60 }) ?? true { bestStartFix = fix }
             }
             .alert("Shared landmark", isPresented: $markingLandmark) {
-                TextField("Name on the sign", text: $sharedLandmark)
+                TextField("Name for this spot", text: $sharedLandmark)
                 Button("Mark here") { camera.mark(sharedLandmark); sharedLandmark = "" }.disabled(sharedLandmark.trimmingCharacters(in: .whitespaces).isEmpty)
                 Button("Cancel", role: .cancel) {}
             } message: { Text("Use the same physical spot when extending this building.") }
@@ -258,7 +315,11 @@ struct RememberRouteView: View {
                 completed = IndoorJourneyTarget(route: route, draft: draft, library: library)
                 scanning = false
                 settings.speak("Route saved. Return to the start, then tap Follow route.")
-            } catch { self.error = error.localizedDescription + (capturedDraft == nil ? "" : " Scan kept. Tap Save route to retry.") }
+            } catch {
+                let message = error.localizedDescription
+                // Retrying cannot fix a trace that needs re-recording; don't suggest it.
+                self.error = message + (capturedDraft == nil || message.contains("Record this route again") ? "" : " Scan kept. Tap Save route to retry.")
+            }
             saving = false
         }
     }

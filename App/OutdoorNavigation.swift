@@ -136,6 +136,7 @@ struct OutdoorRouteView: View {
     @State private var roomRequest: RoomMappingRequest?
     @State private var roomTarget: IndoorJourneyTarget?
     @StateObject private var roomVoice = VoiceCommandInput()
+    @StateObject private var questions = DestinationAgentHost()
     @StateObject private var roomLibrary = ScanLibrary()
     @StateObject private var roomMemory = JourneyLibrary()
     @Environment(\.dismiss) private var dismiss
@@ -447,6 +448,8 @@ struct OutdoorRouteView: View {
             }
             .sheet(isPresented: $accessibility) { NavigationAccessibilitySheet(store: settings) }
             .onAppear {
+                questions.speak = { settings.speak($0, force: true, priority: .ambient, userRequested: true) }
+                questions.acknowledge = { settings.speak(VoiceResponseTiming.acknowledgment, priority: .ambient) }
                 camera.onPostureAlert = { _ in }
                 camera.onSafetyAlert = { text in
                     // Camera posture affects camera sensing, not GPS walking directions.
@@ -459,9 +462,10 @@ struct OutdoorRouteView: View {
                     announceAwareness("Possible surface ahead, about " + LiveGuidance.distance(distance, feet: feet) + ". Pause and check your surroundings.")
                 }
                 if let initialRoom, roomQuery.isEmpty { roomQuery = initialRoom }; if automaticallyStart { started = true; gpsStartedAt = Date(); location.start() } }
-            .onDisappear { signTask?.cancel(); signTask = nil; readingSign = false; settings.updateJourneySound(active: false); camera.stop(); location.stop(); directions?.cancel(); directions = nil; google.stop() }
+            .onDisappear { questions.agent.cancel(); questions.speak = { _ in }; questions.acknowledge = {}; signTask?.cancel(); signTask = nil; readingSign = false; settings.updateJourneySound(active: false); camera.stop(); location.stop(); directions?.cancel(); directions = nil; google.stop() }
             .onChange(of: phase) { _, value in
                 if value == .background {
+                    questions.agent.cancel()
                     settings.updateJourneySound(active: false); trail.interrupt(); walking?.pause()
                     google.stop(); settings.stopSpeech(); camera.stop(); location.stop()
                     directions?.cancel(); directions = nil; started = false
@@ -667,6 +671,9 @@ struct OutdoorRouteView: View {
                 }
             } else { Text("Finding your walking route…").font(.headline) }
             if !showingMap && camera.postureIssue != nil { Text("Raise the camera for obstacle sensing.").font(.caption).foregroundStyle(.secondary) }
+            if let answer = questions.voiceResponse {
+                Text(answer).font(.callout).lineLimit(3).accessibilityIdentifier("outdoorAssistantAnswer")
+            }
             CameraGuidanceActions(showingMap: showingMap, repeatGuidance: repeatOutdoorGuidance, toggleMap: { showingMap.toggle() }) {
                 HoldToTalk(voice: roomVoice, before: { settings.stopSpeech() }, onUnrecognized: { settings.speak(VoiceCommandInput.notUnderstood) }, haptics: settings.preferences.haptics, diameter: 44, compact: true, result: handleWalkingVoice)
             }
@@ -715,6 +722,8 @@ struct OutdoorRouteView: View {
         let value = text.lowercased()
         if ["stop", "stop guidance", "end directions", "cancel"].contains(value.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))) {
             settings.stopSpeech(); dismiss()
+        } else if questions.agent.canAnswerGeneralQuestion(text) {
+            questions.agent.submit(text, model: questions)
         } else if (indoorEntranceNearby || arrived && indoor != nil) && ["continue indoors", "start indoor route", "indoor route"].contains(value.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))) {
             openIndoorGuidance()
         } else if value.contains("read"), value.contains("sign") {
@@ -796,14 +805,27 @@ struct OutdoorRouteView: View {
         case .nearDestination: text = "Near your destination. Check the entrance."
         case .guiding: text = walking.wrongWay ? "You may be going the wrong way. Turn around when safe." : (walking.travelInstruction.isEmpty ? "Follow the mapped path." : walking.travelInstruction) + ". " + walking.upcomingDetail(feet: true) + "."
         }
-        let key = "\(walking.index)-\(walking.status)-\(walking.wrongWay)-\(walking.travelledOnLeg > 3)-\(walking.announcementBand)"
-        let reminder = walking.status == .guiding && Date().timeIntervalSince(lastWalkingAnnouncement) >= 12
+        let key = walkingSpeechKey(walking)
+        let expectedRoute = route
+        let reminder = UserDefaults.standard.bool(forKey: "guidanceReminders") && walking.status == .guiding && Date().timeIntervalSince(lastWalkingAnnouncement) >= 12
         let newLeg = !spokenWalking.isEmpty && !spokenWalking.hasPrefix("\(walking.index)-")
         if force || (spokenWalking != key && (newLeg || walking.status != .guiding || walking.wrongWay || Date().timeIntervalSince(lastWalkingAnnouncement) >= 3)) || reminder {
             spokenWalking = key; lastWalkingAnnouncement = Date()
-            settings.speak(text, priority: walking.status == .guiding ? .direction : .safety, positionTime: lastWalkingFix.map { ProcessInfo.processInfo.systemUptime + $0.timeIntervalSinceNow })
+            let urgent = walking.status == .locating || walking.status == .offRoute || walking.wrongWay
+            settings.speak(text, priority: urgent ? .safety : .direction,
+                           positionTime: lastWalkingFix.map { ProcessInfo.processInfo.systemUptime + $0.timeIntervalSinceNow },
+                           userRequested: force, speechKey: key, stillRelevant: {
+                guard let current = self.walking else { return false }
+                return self.phase == .active && !self.arrived && !self.insideBuilding &&
+                    self.route === expectedRoute && self.walkingSpeechKey(current) == key && !self.indoorEntranceNearby
+            })
             settings.cue(walking.status == .guiding && !walking.wrongWay ? (newLeg ? .turn : .approach) : .attention, instruction: text)
         }
+    }
+    private func walkingSpeechKey(_ value: OutdoorProgress) -> String {
+        // Crossing the first three metres is not a new maneuver. Position and
+        // map updates continue at full rate without causing another sentence.
+        "\(value.index)-\(route.map { String(describing: ObjectIdentifier($0)) } ?? "none")-\(value.status)-\(value.wrongWay)-\(value.announcementBand)"
     }
     private func speakGoogle(force: Bool = false) {
         guard google.active, !insideBuilding, !arrived, !roomVoice.busy, phase == .active, !presented else { return }
@@ -812,13 +834,17 @@ struct OutdoorRouteView: View {
             return
         }
         let reliable = reliableGoogleFix && !google.instruction.isEmpty
+        let expectedInstruction = google.instruction
         let distance = google.distanceToTurn ?? .infinity
         let band = distance <= 5 ? "now" : distance <= 15 ? "near" : "ahead"
         let text = reliable ? google.instruction + (distance.isFinite && distance > 5 ? ". In about \(Int((distance * 3.28084 / 5).rounded() * 5)) feet." : ".") : "GPS uncertain. Check the map."
         let announcement = reliable ? google.instruction + band : "uncertain"
         guard force || (announcement != lastGoogleSpeech && Date().timeIntervalSince(lastGoogleSpeechAt) >= 3) else { return }
         lastGoogleSpeech = announcement; lastGoogleSpeechAt = Date()
-        settings.speak(text, priority: reliableGoogleFix ? .direction : .safety)
+        settings.speak(text, priority: reliableGoogleFix ? .direction : .safety, userRequested: force, speechKey: announcement, stillRelevant: {
+            self.phase == .active && self.google.active && !self.arrived && !self.insideBuilding &&
+                self.google.instruction == expectedInstruction && (reliable == (self.reliableGoogleFix && !self.google.instruction.isEmpty))
+        })
     }
     private func confirmInside() {
         google.stop()

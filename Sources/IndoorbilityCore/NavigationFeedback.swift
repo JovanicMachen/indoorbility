@@ -28,27 +28,34 @@ public enum FloorPlaneBounds {
 }
 
 public enum SpeechImportance: Int, Comparable, Sendable {
-    case routine, direction, safety
+    case ambient, routine, direction, safety
     public static func < (a: Self, b: Self) -> Bool { a.rawValue < b.rawValue }
 }
 public struct PendingSpeech: Equatable, Sendable {
+    public let id = UUID()
     public let text: String
     public let priority: SpeechImportance
     public let expires: Double
     public let requestedAt: Double
     public let positionTime: Double?
-    public init(_ text: String, priority: SpeechImportance, now: Double, positionTime: Double? = nil) {
+    public let userRequested: Bool
+    public let deduplicationKey: String
+    public init(_ text: String, priority: SpeechImportance, now: Double, positionTime: Double? = nil,
+                userRequested: Bool = false, deduplicationKey: String? = nil) {
         self.text = text; self.priority = priority; self.requestedAt = now; self.positionTime = positionTime
-        expires = now + (priority == .safety ? 6 : 10)
+        self.userRequested = userRequested
+        self.deduplicationKey = deduplicationKey ?? text
+        expires = now + (priority == .safety ? 6 : priority == .direction ? 5 : 10)
     }
 }
 public struct NavigationSpeechQueue {
     private var lines: [PendingSpeech] = []
     public init() {}
+    public var pendingIDs: Set<UUID> { Set(lines.map(\.id)) }
     public static func shouldInterrupt(active: PendingSpeech, incoming: PendingSpeech) -> Bool {
         incoming.text != active.text &&
-            ((incoming.priority == .safety && active.priority != .safety) ||
-             (incoming.priority == .direction && active.priority != .safety))
+            (incoming.priority == .safety && active.priority != .safety ||
+             incoming.priority == .direction && active.priority == .ambient)
     }
     public mutating func clear() { lines = [] }
     public mutating func push(_ line: PendingSpeech) {
@@ -63,9 +70,59 @@ public struct NavigationSpeechQueue {
         guard !lines.contains(where: { $0.priority == line.priority }) else { return }
         push(line)
     }
-    public mutating func next(now: Double) -> PendingSpeech? {
-        lines.removeAll { $0.expires < now }
+    public mutating func next(now: Double, isRelevant: (PendingSpeech) -> Bool = { _ in true }) -> PendingSpeech? {
+        lines.removeAll { $0.expires < now || !isRelevant($0) }
         return lines.isEmpty ? nil : lines.removeFirst()
+    }
+}
+
+/// Speech is rationed independently of position updates. Explicit replies and
+/// Repeat are never discarded merely because an ordinary sentence is playing.
+public struct SpeechAdmission {
+    private var started: [String: Double] = [:]
+    public init() {}
+    public mutating func reset() { started = [:] }
+    public mutating func forget(_ key: String) { started.removeValue(forKey: key) }
+    public func allows(_ line: PendingSpeech, active: PendingSpeech?, now: Double) -> Bool {
+        guard !line.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        if line.userRequested { return true }
+        if active?.deduplicationKey == line.deduplicationKey { return false }
+        if let last = started[line.deduplicationKey], now-last < (line.priority == .safety ? 3 : 8) { return false }
+        // Existing routine calls include button confirmations and answers. Only
+        // explicitly optional commentary may be discarded because voice is busy.
+        return active == nil || line.priority != .ambient
+    }
+    public mutating func didStart(_ line: PendingSpeech, now: Double) {
+        started = started.filter { now-$0.value < 60 }
+        started[line.deduplicationKey] = now
+        if started.count > 32 { started = [line.deduplicationKey: now] }
+    }
+}
+
+public enum VoiceResponseTiming {
+    /// Tap-to-talk ends after a pause; hold-to-talk waits for release instead.
+    public static let pauseSeconds = 1.2
+    /// Give the recognizer a bounded chance to finalize after audio ends.
+    public static let finalResultSeconds = 1.0
+    public static let acknowledgmentSeconds = 0.65
+    public static let acknowledgment = "Checking that."
+}
+
+public enum AgentSpeechPolicy {
+    public static func normalizedCommand(_ text: String) -> String {
+        text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+    }
+    /// Internal lookups stay silent. Final responses still use validated device
+    /// results; urgent controls and live turn timing never wait for cloud AI.
+    public static func presentImmediately(tool: AgentTool, status: AgentToolResult.Status) -> Bool {
+        if status != .success { return true }
+        return [.changeDestination, .replanRoute, .repeatInstruction, .describeCurrentView,
+                .addShoppingItem, .optimizeShoppingRoute].contains(tool)
+    }
+    public static func isImmediateLocalCommand(_ text: String, hasDestination: Bool) -> Bool {
+        let value = normalizedCommand(text)
+        if ["stop", "pause", "pause guidance", "stop guidance", "cancel"].contains(value) { return true }
+        return hasDestination && ["repeat", "repeat directions", "repeat instruction", "say that again", "where am i"].contains(value)
     }
 }
 

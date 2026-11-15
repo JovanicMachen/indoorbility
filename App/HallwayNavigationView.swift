@@ -13,6 +13,10 @@ import IndoorbilityCore
     @Published private(set) var matchingDelayed = false
     @Published private(set) var startupFailure: String?
     @Published private(set) var hasEstablishedPosition = false
+    /// "I'm at the start" was requested: begin from here without a map match.
+    @Published private(set) var startingHere = false
+    /// Guidance began from an assumed start rather than a saved-map match.
+    private var assumedStart = false
     private var unstartedFollower: HallwayFollower?
     @Published private(set) var recoveryFirst: UUID?
     let camera = SpatialSession()
@@ -54,11 +58,23 @@ import IndoorbilityCore
     func deliverGuidance() {
         guard !camera.floorHazard, ProcessInfo.processInfo.systemUptime >= surfaceWarningUntil else { return }
         let value = guidance
-        guard delivery.consume(value, listening: listeningForCommand, now: ProcessInfo.processInfo.systemUptime, repeatReliable: running && fresh && follower.stable && !needsAlignment && follower.state == .guiding) else { return }
+        let reminders = UserDefaults.standard.bool(forKey: "guidanceReminders")
+        guard delivery.consume(value, listening: listeningForCommand, now: ProcessInfo.processInfo.systemUptime,
+                               repeatReliable: reminders && running && fresh && follower.stable && !needsAlignment && follower.state == .guiding) else { return }
         if value.cue == .turn {
             deliveredTurnTime = ProcessInfo.processInfo.systemUptime; deliveredTurnProgress = follower.progress
         }
-        settings.speak(value.text, priority: value.cue == .attention ? .safety : .direction, positionTime: lastPoseWall > 0 ? lastPoseWall : nil)
+        settings.speak(value.text, priority: value.cue == .attention ? .safety : .direction,
+                       positionTime: lastPoseWall > 0 ? lastPoseWall : nil,
+                       speechKey: value.id,
+                       stillRelevant: { [weak self] in
+            guard let self else { return false }
+            let directional = [.guiding, .nearRoom].contains(self.follower.state)
+            return self.running && !self.listeningForCommand && !self.camera.floorHazard && self.guidance.id == value.id &&
+                (!directional || self.fresh && !self.needsAlignment && self.follower.stable)
+        }, onDiscard: { [weak self] in
+            self?.delivery.rearm(value.id, now: ProcessInfo.processInfo.systemUptime)
+        })
         settings.cue(value.cue ?? .approach, instruction: value.text)
     }
     private var epoch = UUID()
@@ -127,7 +143,7 @@ import IndoorbilityCore
             follower.invalidate("Matching the saved map."); delivery.reset(); settings.stopSpeech()
             return
         }
-        if follower.localized {
+        if follower.localized || follower.forgiving {
             // GPS mode: never lock guidance; it re-acquires on the saved map by itself.
             follower.update(position: nil, heading: nil, time: ProcessInfo.processInfo.systemUptime, trackingNormal: false)
             settings.directionalCue(nil); return
@@ -139,7 +155,7 @@ import IndoorbilityCore
         settings.stopSpeech(); settings.directionalCue(nil)
     }
     private func compareSurfaces(_ observation: DepthObservation) {
-        guard !follower.localized, !comparisonBusy, let reference = surfaceReference, mapConfidence == .confirmed,
+        guard !assumedStart, !follower.localized, !comparisonBusy, let reference = surfaceReference, mapConfidence == .confirmed,
               fresh, follower.stable, follower.state == .guiding, observation.coverage >= 0.65,
               observation.timestamp-lastComparison >= 0.5 else { return }
         lastComparison = observation.timestamp; comparisonBusy = true
@@ -177,6 +193,14 @@ import IndoorbilityCore
         guard running, fresh, !needsAlignment, mapConfidence == .confirmed, follower.stable,
               [.guiding, .nearRoom, .arrived].contains(follower.state) else { return nil }
         return follower.position
+    }
+    /// The big arrow and distance. Only from a fresh, confirmed position
+    /// (or arrival); never guessed while matching or after tracking loss.
+    var liveDirection: IndoorDirection? {
+        if follower.state == .arrived { return IndoorDirection.live(follower) }
+        guard running, fresh, !needsAlignment, mapConfidence == .confirmed, !camera.floorHazard,
+              follower.stable, [.guiding, .nearRoom, .offRoute].contains(follower.state) else { return nil }
+        return IndoorDirection.live(follower)
     }
     private var sourceCheckTime: TimeInterval = -.infinity
     private var sourceAvailable = false
@@ -224,7 +248,8 @@ import IndoorbilityCore
         }
         camera.onObjectAlert = { [weak self] text in
             guard let self, !self.listeningForCommand, !self.agent.busy, ProcessInfo.processInfo.systemUptime >= self.surfaceWarningUntil else { return }
-            self.surfaceWarning = text; self.surfaceWarningUntil = ProcessInfo.processInfo.systemUptime + 6
+            // A short pause so the obstacle is heard before the next direction.
+            self.surfaceWarning = text; self.surfaceWarningUntil = ProcessInfo.processInfo.systemUptime + 4
             self.settings.directionalCue(nil); self.settings.speak(text, priority: .safety); self.settings.cue(.attention)
         }
         camera.onSurfaceAlert = { [weak self] distance in
@@ -236,6 +261,16 @@ import IndoorbilityCore
 
         }
         camera.onPose = { [weak self] position, heading, time, normal in self?.receive(position, heading: heading, time: time, normal: normal) }
+    }
+    /// Start guidance from where the walker stands, assumed to be the recorded
+    /// start facing the way the route begins. A saved-map match is not required.
+    /// Live LiDAR tracking measures every step after this.
+    func startFromHere() async {
+        guard !hasEstablishedPosition else { return }
+        startingHere = true
+        // A pending saved-map match keeps tracking in a relocalizing state; restart without it.
+        if usingSavedMap || !running { await start(useSavedMap: false, reloadSavedMap: true) }
+        settings.speak("Starting from \(route.entrance.label). Hold the phone up, facing the way the route begins.", force: true)
     }
     func start(useSavedMap: Bool = true, reloadSavedMap: Bool = false) async {
         // An app activation can arrive while an earlier disk load unwinds.
@@ -301,7 +336,7 @@ import IndoorbilityCore
                         self.matchingDelayed = true
                     }
                     if self.running && !self.camera.running { self.running = false; self.losePosition() }
-                    if self.running && !self.fresh && self.follower.stable && self.follower.localized {
+                    if self.running && !self.fresh && self.follower.stable && (self.follower.localized || self.follower.forgiving) {
                         self.settings.updateJourneySound(active: false)
                         // GPS mode re-acquires by itself once frames resume.
                         self.follower.update(position: nil, heading: nil, time: ProcessInfo.processInfo.systemUptime, trackingNormal: false)
@@ -414,9 +449,23 @@ import IndoorbilityCore
         let routeAvailable = available
         let previousState = follower.state
         follower.update(position: p, heading: heading, time: time, trackingNormal: normal, routeAvailable: routeAvailable)
+        if startingHere, normal, needsAlignment, follower.stable, routeAvailable, let p, let heading {
+            do {
+                let alignment = try ScanAlignment.startingHere(livePosition: p, liveHeading: heading, path: route.path)
+                // Follow forgivingly from here to the recorded end stop, re-finding
+                // your place on the path after detours instead of stopping.
+                follower.followFromStart(using: alignment)
+                startingHere = false; assumedStart = true; automaticStartAllowed = false
+                needsAlignment = false; mapConfidence = .confirmed; automaticMatchHint = nil
+                surfaceAgreement = SurfaceAgreementFilter(); delivery.reset()
+                if let began = recoveryStarted { recoverySeconds = ProcessInfo.processInfo.systemUptime-began }
+            } catch {
+                startingHere = false; self.error = error.localizedDescription
+            }
+        }
         if previousState != follower.state && [.trackingLost, .offRoute, .blocked, .arrived].contains(follower.state) { settings.stopSpeech() }
         camera.showRoute(route.path, alignment: follower.alignment, verified: !camera.floorHazard && camera.postureIssue == nil && heading != nil && normal && !needsAlignment && follower.stable && [.guiding, .nearRoom].contains(follower.state))
-        if follower.localized {
+        if follower.localized || follower.forgiving {
             if previousState != follower.state && follower.state == .arrived { recordArrival() }
         } else if [.trackingLost, .offRoute].contains(follower.state) && previousState != follower.state {
             if automaticStartAllowed && (mapConfidence == .unverified || mapConfidence == .savedMap) {
@@ -552,7 +601,7 @@ import IndoorbilityCore
                 proposeDestination(target)
                 return
             }
-            if command.contains("repeat") {
+            if command.contains("repeat") || command.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters)) == "say that again" {
                 voiceResponse = guidance.text
             } else if command.contains("where am i") {
                 voiceResponse = fresh && follower.stable && [.guiding, .nearRoom].contains(follower.state)
@@ -572,13 +621,16 @@ import IndoorbilityCore
                 return
             }
         } catch { voiceResponse = error.localizedDescription }
-        settings.speak(voiceResponse ?? "Nothing changed.", force: true)
+        settings.speak(voiceResponse ?? "Nothing changed.", force: true, userRequested: true)
     }
     func submitVoice(_ text: String) {
         let reply = text.lowercased().trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
         if ["stop talking", "mute", "mute all sound"].contains(reply) { settings.allSoundMuted = true; voiceResponse = "All app sound muted."; return }
         if ["turn the voice back on", "unmute"].contains(reply) { settings.allSoundMuted = false; settings.setPreference(\.speech, true); settings.speak(guidance.text); return }
         if reply.contains("how much farther") { voiceResponse = follower.stable && follower.state == .guiding ? LiveGuidance.distance(follower.remaining, feet: UserDefaults.standard.bool(forKey: "guidanceFeet")) + " remain on the mapped route." : "Position uncertain. Confirm a known landmark."; settings.speak(voiceResponse!); return }
+        if ["start", "start here", "i'm at the start", "im at the start", "go", "begin"].contains(reply), !hasEstablishedPosition {
+            Task { await startFromHere() }; return
+        }
         if ["yes", "yes please", "correct"].contains(reply) { confirmDestination(); return }
         if ["no", "no thanks", "cancel"].contains(reply), pendingDestination != nil { declineDestination(); return }
         declineDestination(speak: false)
@@ -916,13 +968,73 @@ private struct IndoorNavigationMap: View {
 
 }
 
+/// Large arrow + distance, designed to be read at a glance or by VoiceOver.
+/// No map interpretation needed: "Go straight 30 ft, then turn left".
+private struct IndoorDirectionsPanel: View {
+    let direction: IndoorDirection?
+    let preview: Bool
+    let feet: Bool
+    let fallback: String
+    let accessibilityText: String
+    var warning: String? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        VStack(spacing: 14) {
+            if let warning {
+                // Obstacle heads-up (already spoken); large and high-contrast.
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.title3.bold()).foregroundStyle(.white)
+                    .padding(.horizontal, 18).padding(.vertical, 12)
+                    .frame(maxWidth: .infinity)
+                    .background(Color(red: 0.62, green: 0.20, blue: 0.20), in: RoundedRectangle(cornerRadius: 18))
+                    .accessibilityIdentifier("obstacleBanner")
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            Spacer(minLength: 0)
+            Image(systemName: direction?.symbol ?? "location.magnifyingglass")
+                .font(.system(size: direction == nil ? 96 : 170, weight: .bold))
+                .foregroundStyle(direction == nil ? Color.secondary : Color.indoorTeal)
+                .opacity(preview ? 0.75 : 1)
+                .contentTransition(.symbolEffect(.replace))
+                .animation(reduceMotion ? nil : .default, value: direction?.arrow)
+            if let direction {
+                Text(direction.headline).font(.largeTitle.bold()).multilineTextAlignment(.center)
+                if let distance = direction.distance {
+                    let parts = IndoorDirection.distanceParts(distance, feet: feet)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(parts.value).font(.system(size: 88, weight: .heavy, design: .rounded)).monospacedDigit()
+                            .contentTransition(.numericText())
+                        Text(parts.unit).font(.system(size: 36, weight: .bold, design: .rounded)).foregroundStyle(.secondary)
+                    }
+                }
+                if let detail = direction.detail {
+                    Text(detail).font(.title2.weight(.semibold)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
+            } else {
+                Text(fallback).font(.title.bold()).multilineTextAlignment(.center)
+            }
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(Color.indoorInk)
+        .minimumScaleFactor(0.6)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: warning)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel((warning.map { $0 + " " } ?? "") + accessibilityText)
+        .accessibilityAddTraits(.updatesFrequently)
+        .accessibilityIdentifier("liveInstruction")
+    }
+}
+
 private struct HallwayGuidanceView: View {
     @ObservedObject var model: HallwayNavigationModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @StateObject private var voice = VoiceCommandInput()
-    @State private var map = true
-    @State private var cameraVisible = false
+    private enum Mode { case directions, map, camera }
+    @State private var mode = Mode.directions
+    private var cameraVisible: Bool { mode == .camera }
     @AppStorage("guidanceFeet") private var feet = false
     var body: some View {
         let _ = NavigationPerformance.shared.bodyEvaluated("Indoor navigation")
@@ -942,15 +1054,21 @@ private struct HallwayGuidanceView: View {
                     }.frame(maxWidth: .infinity)
                     navigationOptions.background(Color.indoorCard, in: Circle())
                 }.foregroundStyle(Color.indoorInk).padding(.horizontal, 16).padding(.top, 8)
-                if map {
+                switch mode {
+                case .directions:
+                    IndoorDirectionsPanel(direction: displayedDirection, preview: previewActive, feet: feet,
+                                          fallback: instructionTitle, accessibilityText: instructionAccessibility,
+                                          warning: model.surfaceWarning)
+                case .map:
                     IndoorNavigationMap(route: model.route, drawing: model.mapDrawing, walls: model.mapWalls,
                         position: model.verifiedMapPosition,
                         nextTurn: guidanceActive ? model.follower.nextMeasuredTurn.map { model.route.path[$0.index] } : nil)
-                } else { Spacer() }
+                case .camera: Spacer()
+                }
             }
         }.safeAreaInset(edge: .bottom, spacing: 0) {
             guidanceCard.padding(.horizontal, 12).padding(.vertical, 8)
-        }.swipeLeftToGoBack(enabled: !map) { dismiss() }
+        }.swipeLeftToGoBack(enabled: mode != .map) { dismiss() }
             .overlay { VoiceEdgeGlow(active: voice.listening) }
             .task(id: phase) { if phase == .active { await model.start() } }
             .onChange(of: model.follower.state) { _, state in
@@ -986,12 +1104,13 @@ private struct HallwayGuidanceView: View {
             ![.blocked, .arrived, .nearRoom].contains(model.follower.state)
     }
     private func repeatDirections() {
-        model.settings.speak(previewActive ? model.follower.recordedPreview.narration(feet: feet) : model.guidance.text, force: true)
+        model.settings.speak(previewActive ? model.follower.recordedPreview.narration(feet: feet) : model.guidance.text, force: true, userRequested: true)
     }
     private var navigationOptions: some View {
         Menu {
-            Button("Map", systemImage: "map") { map = true; cameraVisible = false }
-            Button("Camera", systemImage: "camera") { map = false; cameraVisible = true }
+            Button("Directions", systemImage: "arrow.up") { mode = .directions }
+            Button("Map", systemImage: "map") { mode = .map }
+            Button("Camera", systemImage: "camera") { mode = .camera }
         } label: {
             Image(systemName: "ellipsis").frame(width: 44, height: 44)
         }.accessibilityLabel("Navigation options")
@@ -999,6 +1118,7 @@ private struct HallwayGuidanceView: View {
     private var positioningStatus: String {
         if model.openingPositionMap { return "Opening saved route" }
         if model.startupFailure != nil { return "Positioning unavailable" }
+        if model.startingHere { return "Starting from here" }
         if model.matchingDelayed && model.needsAlignment { return "Match near the recorded path" }
         return "Matching your position"
     }
@@ -1012,24 +1132,46 @@ private struct HallwayGuidanceView: View {
         if model.matchingDelayed && model.needsAlignment { return "Match near the recorded path" }
         return model.needsAlignment || model.follower.state == .ready ? "Finding your position" : "Position unavailable"
     }
+    private var displayedDirection: IndoorDirection? {
+        if previewActive { return IndoorDirection.preview(model.follower.recordedPreview) }
+        return model.liveDirection
+    }
+    private var instructionAccessibility: String {
+        if previewActive { return "Route preview from recorded start. \(instructionTitle). Live position not matched." }
+        return displayedDirection?.spoken(feet: feet) ?? instructionTitle
+    }
     private var guidanceCard: some View {
         VStack(spacing: 12) {
             if previewActive {
                 Text("Route preview · from recorded start").font(.caption.bold())
                     .foregroundStyle(Color.indoorTeal).accessibilityIdentifier("recordedRoutePreview")
             }
-            Image(systemName: previewActive ? model.follower.recordedPreview.symbol : model.follower.state == .arrived || guidanceActive
-                  ? LiveGuidance.symbol(for: instructionTitle, reliable: true) : "location.magnifyingglass")
-                .font(.system(size: 48, weight: .bold)).foregroundStyle(Color.indoorTeal)
-                .accessibilityHidden(true)
-            Text(instructionTitle).font(.title2.bold()).multilineTextAlignment(.center)
-                .monospacedDigit().accessibilityIdentifier("liveInstruction")
-                .accessibilityLabel(previewActive ? "Route preview from recorded start. \(instructionTitle). Live position not matched." : instructionTitle)
-            if !guidanceActive && model.follower.state != .arrived {
+            // The Directions view already shows the arrow and instruction full size.
+            if mode != .directions {
+                Image(systemName: previewActive ? model.follower.recordedPreview.symbol : model.follower.state == .arrived || guidanceActive
+                      ? LiveGuidance.symbol(for: instructionTitle, reliable: true) : "location.magnifyingglass")
+                    .font(.system(size: 48, weight: .bold)).foregroundStyle(Color.indoorTeal)
+                    .accessibilityHidden(true)
+                Text(instructionTitle).font(.title2.bold()).multilineTextAlignment(.center)
+                    .monospacedDigit().accessibilityIdentifier("liveInstruction")
+                    .accessibilityLabel(instructionAccessibility)
+            }
+            if !guidanceActive && model.follower.state != .arrived && model.liveDirection == nil {
                 Text(positioningStatus).font(.caption.bold()).foregroundStyle(.secondary)
                     .accessibilityIdentifier("indoorPositioningStatus")
-                Text(model.startupFailure ?? (model.openingPositionMap ? "Preparing positioning data…" : model.automaticMatchHint ?? "Look around near the recorded route."))
+                Text(model.startupFailure ?? (model.openingPositionMap ? "Preparing positioning data…" : model.startingHere ? "Hold the phone up, facing the way the route begins." : model.automaticMatchHint ?? "At \(model.route.entrance.label)? Tap I’m at the start."))
                     .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                if !model.hasEstablishedPosition && model.startupFailure == nil && !model.openingPositionMap {
+                    Button {
+                        Task { await model.startFromHere() }
+                    } label: {
+                        Label(model.startingHere ? "Starting…" : "I’m at the start", systemImage: "figure.walk")
+                            .font(.title3.bold()).frame(maxWidth: .infinity, minHeight: 52)
+                    }.buttonStyle(.borderedProminent).tint(.indoorTeal)
+                        .disabled(model.startingHere)
+                        .accessibilityHint("Starts directions from where you are standing, facing the way the route begins.")
+                        .accessibilityIdentifier("startFromHere")
+                }
                 if model.openingPositionMap {
                     ProgressView().accessibilityLabel("Opening positioning map")
                 } else if model.startupFailure != nil || model.matchingDelayed {
@@ -1069,6 +1211,17 @@ private struct HallwayGuidanceView: View {
 }
 
 extension HallwayNavigationModel: NavigationAgentHost {
+    var supportsLocalGuidanceCommands: Bool { true }
+    func beginConversationTurn() { settings.stopSpeech(); voiceResponse = nil }
+    func presentGeneralAnswer(_ answer: String) {
+        voiceResponse = "AI answer. " + answer
+        // Knowledge answers yield to the next real turn or safety warning.
+        settings.speak("AI answer. " + answer, force: true, priority: .ambient, userRequested: true,
+                       stillRelevant: { [weak self] in self?.running == true })
+    }
+    func acknowledgeAgentRequest() {
+        settings.speak(VoiceResponseTiming.acknowledgment, priority: .ambient)
+    }
     func beginAgentTurn(_ text: String) {
         settings.stopSpeech()
         agentUtterance = String(text.prefix(1000)); resolvedAgentDestinations = []; calculatedAgentDestination = nil
@@ -1107,13 +1260,15 @@ extension HallwayNavigationModel: NavigationAgentHost {
         automaticStartAllowed = false; announced = next.instruction
         // SpatialSession and its ARSession are deliberately untouched.
     }
-    func presentClarification(_ text: String) { voiceResponse = text; settings.speak(text, force: true) }
+    func presentClarification(_ text: String) { voiceResponse = text; settings.speak(text, force: true, userRequested: true) }
     func presentAgentResult(_ result: AgentToolResult) {
         let current = agentContext()
         guard current.sessionRevision == result.sessionRevision else { return }
         voiceResponse = result.userSafeExplanation
         if result.status != .success || current.tracking == "verified" {
-            settings.speak(result.userSafeExplanation, force: true)
+            settings.speak(result.userSafeExplanation, force: true, userRequested: true, stillRelevant: { [weak self] in
+                self?.agentContext().sessionRevision == result.sessionRevision
+            })
         }
     }
     func executeAgent(_ call: AgentCall) async -> AgentToolResult {

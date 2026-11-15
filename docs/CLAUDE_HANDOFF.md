@@ -4,6 +4,76 @@ Start here when continuing this repository in Claude. The README and older build
 reports contain historical milestones; inspect current code before relying on
 their feature or verification claims.
 
+Latest speech changes are described in [Calm, responsive speech](CALM_RESPONSIVE_SPEECH.md).
+
+## November 15 update — 3D models, spoken names, route choice, start-here
+
+- Routes has a cube button (top right) opening `ScanModelGalleryView`: every saved scan
+  as a rotatable SceneKit model on a night-sky backdrop, with the walked path drawn as a
+  cyan tube (green start, gold end stop). Code is in `App/VolunteerReviewView.swift`.
+- `SpokenPlaceMatch` (core) repairs misheard names ("louis rm strng" → "Louis Armstrong")
+  against saved rooms/buildings only; digits must match exactly and close ties are not
+  guessed. Saved names are also passed to speech recognition as contextual strings.
+  When outdoor search finds nothing, the app tries a saved-name fix, then the new
+  backend `mode: "place"` spelling agent (tool-free), and searches once more.
+- Navigation agent prompt now repairs speech spelling, retries via
+  getNearbyMappedDestinations, and allows six device calls (app loop raised to 7).
+  The phone still only accepts a destination that matches its saved catalog.
+- `RouteChoice.ranked` picks, among recordings to the same room, the one whose
+  recorded start pin is nearest your GPS fix (ties within GPS error keep saved order).
+- "I'm at the start" now uses `HallwayFollower.followFromStart`: forgiving GPS-style
+  following toward the recorded end stop, re-finding your place after detours.
+- Validation: 231 core tests, 43 backend tests, simulator build, gallery checked in the
+  simulator. Backend deployed to the existing Railway service as deployment
+  `9361aa93-6827-4550-8cdf-4f1978418928` (same `/data` volume, no variable changes):
+  `/health` ok, `/ready` ready, unauthenticated `/agent/check` and `place` turns return 401.
+  Deploy by running `railway up` from a staging folder that contains `backend/` (the service
+  root directory is `/backend`; `--path-as-root` fails). Authenticated production place
+  correction and physical iPhone checks are still pending.
+
+## General questions — November 14 update
+
+The existing microphone and Help/Home input now accept general questions and
+short follow-ups, including during outdoor, indoor and camera assistance. Answers
+are concise. Navigation and safety speech can interrupt a general answer.
+This does not enable an always-listening microphone or live web search.
+
+`Sources/IndoorbilityCore/GeneralAssistant.swift` and `backend/general_assistant.py`
+share routing fixtures in `Tests/Fixtures/general_assistant_cases.json`. General
+conversation uses a separate tool-free agent and typed answer. Its request does
+not send live pose, room catalog, closures or route context to OpenAI. Conversation
+history retains only three question/answer pairs in app memory; navigating to
+device actions clears that host's chat history. It is not stored in UserDefaults,
+Keychain or the backend database. Explicit user text/history is still sent to
+OpenAI; Responses storage and SDK tracing are disabled. The output filters are
+defense in depth, not proof that every generated fact is correct.
+
+The original device-tool coordinator, authentication, ownership and offline
+navigation remain separate. General answers cannot execute device tools, and
+general failures never fall through into destination parsing. Without a cloud
+connection, the app says general questions need AI; local navigation continues.
+
+Validation: 226 core and 40 backend tests passed. Two real authenticated local
+HTTP/OpenAI requests answered “What is LiDAR?” in 2,096 ms and “And why is that
+useful?” in 757 ms, with zero device calls. These are single samples including
+provider/network time, not speech latency benchmarks or physical navigation tests.
+The signed iOS build passed and was installed and launched on the existing paired
+iPhone after it reconnected, without uninstalling or resetting credentials/data.
+Three selected simulator UI regressions
+passed: general questions while offline without creating a destination, full-screen
+search/Settings swipe-back, and production guidance/mute/tracking recovery. The
+new UI test initially typed before the keyboard transition finished; waiting for
+keyboard dismissal and reappearance fixed the test timing, with no production
+UI workaround. This is not a full UI-suite run.
+
+Production release: existing Railway deployment
+`39bc8292-c9b3-4845-a14f-27d84cdb41f4` is SUCCESS. `/health` confirms
+`generalQuestions: true`, `/ready` returns ready, and unauthenticated `/agent/check`
+returns 401. The same 500 MB `/data` volume remains READY; no environment variables,
+service, signing secret or pairing records were replaced. Production authenticated
+general Q&A has not been checked on the physical iPhone yet. Backend source is
+deployed from the working tree; this update is not yet committed/pushed.
+
 ## Current implementation
 
 - Native SwiftUI app, iOS 17 minimum, bundle ID `com.indoorbility.app`.
@@ -27,8 +97,8 @@ their feature or verification claims.
   that respect Reduce Motion and high contrast. The logo is an iOS app icon;
   the website was not changed.
 - The existing FastAPI/OpenAI agent backend remains configured at
-  `https://indoorbility-production.up.railway.app`. This handoff does not verify
-  its current deployed revision or perform a new production deployment.
+  `https://indoorbility-production.up.railway.app`. See the general-question release
+  above for the latest verified deployment and its limits.
 - Device authentication retains Keychain credentials, short-lived access tokens,
   rotating refresh credentials, durable device identity and server revocation.
   Backend changes remove fixed 30-day expiry for new/renewed credentials and
@@ -54,7 +124,7 @@ their feature or verification claims.
    secrets locally. Do not create a second Railway service or replace its
    environment/storage as part of routine development.
 
-## Verification at this checkpoint
+## Earlier checkpoint verification
 
 - 198 Swift core tests passed, zero failures.
 - 31 backend tests passed, zero failures, including a real localhost process

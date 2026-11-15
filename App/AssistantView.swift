@@ -19,7 +19,7 @@ struct AssistantView: View {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("A little help,\nwhen you need it.").font(.largeTitle.weight(.semibold)).foregroundStyle(Color.indoorTeal)
-                    Text("Ask about a place, your route, or what’s ahead.").foregroundStyle(.secondary)
+                    Text("Ask about a place, your route, or a general question.").foregroundStyle(.secondary)
                 }.padding(.top, 20)
                 Panel {
                     TextField("What would you like to know?", text: $request, axis: .vertical)
@@ -47,14 +47,15 @@ struct AssistantView: View {
                 library.reload(); memory.refresh(from: library)
                 helper.catalog = memory.preferredDestinations; helper.preferences = store.preferences
                 helper.fallback = { _ in localPlan() }
-                helper.speak = { response = $0; store.speak($0, force: true) }
+                helper.speak = { response = $0; store.speak($0, force: true, userRequested: true) }
+                helper.acknowledge = { store.speak(VoiceResponseTiming.acknowledgment, priority: .ambient) }
                 helper.requestCamera = { cameraHelp = true }
                 helper.found = { place in
                     UserDefaults.standard.set(place.room + " " + place.building, forKey: "pendingDestinationQuery")
                     store.selectedTab = 0
                 }
             }
-            .onDisappear { helper.agent.cancel(); helper.found = { _ in }; helper.fallback = { _ in }; helper.speak = { _ in }; helper.requestCamera = nil }
+            .onDisappear { helper.agent.cancel(); helper.found = { _ in }; helper.fallback = { _ in }; helper.speak = { _ in }; helper.acknowledge = {}; helper.requestCamera = nil }
             .fullScreenCover(isPresented: $cameraHelp) { CameraAssistanceView(settings: store) }
             .sheet(item: $destination) { target in NavigationStack { DestinationJourneyView(target: target, settings: store) } }
             .sheet(isPresented: $showShopping) { NavigationStack { ShoppingDemoView(settings: store, initialItems: shopping ?? [], hardAvoidStairs: LocalNavigationAgent.constraints(for: request, base: store.preferences).avoidStairs) } }

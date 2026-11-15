@@ -136,6 +136,8 @@ struct MeshRecord: Codable, Sendable {
     @Published var samples: [ScanSample] = []
     @Published var landmarks: [ScanLandmark] = []
     @Published var meshCount = 0
+    /// Plain-language reason tracking is limited right now, nil when normal.
+    @Published var trackingTip: String?
     @Published var canSave = false
     @Published var running = false
     @Published var error: String?
@@ -294,6 +296,15 @@ struct MeshRecord: Codable, Sendable {
             consumeSafety(frame)
         }
         guard case .normal = frame.camera.trackingState else {
+            let tip: String
+            switch frame.camera.trackingState {
+            case .limited(.excessiveMotion): tip = "Moving too fast. Slow down and hold the phone steady."
+            case .limited(.insufficientFeatures): tip = "Too little detail. Point the camera at walls, doors or furniture."
+            case .limited(.initializing): tip = "Getting ready. Hold the phone up and look around slowly."
+            case .limited(.relocalizing): tip = "Finding your place. Look around slowly."
+            default: tip = "Tracking paused. Hold still and point at a textured wall."
+            }
+            if trackingTip != tip { trackingTip = tip }
             savedMapTracking.trackingChanged(normal: false)
             if trackingWasNormal { trackingInterruptions += 1 }
             trackingWasNormal = false
@@ -304,6 +315,7 @@ struct MeshRecord: Codable, Sendable {
             return
         }
         trackingWasNormal = true
+        if trackingTip != nil { trackingTip = nil }
         // For a loaded initialWorldMap, normal tracking establishes the saved
         // coordinate frame; an intermediate limited callback needn't be observed.
         savedMapTracking.trackingChanged(normal: true)
@@ -332,7 +344,7 @@ struct MeshRecord: Codable, Sendable {
         for case let anchor as ARMeshAnchor in anchors {
             meshes[anchor.identifier] = anchor
             let now = ProcessInfo.processInfo.systemUptime
-            if showingMesh && now-(lastMeshRender[anchor.identifier] ?? 0) >= 0.25 {
+            if showingMesh && now-(lastMeshRender[anchor.identifier] ?? 0) >= LiveMeshBudget.refreshInterval {
                 lastMeshRender[anchor.identifier] = now; queueMesh(anchor)
             }
         }
@@ -340,7 +352,7 @@ struct MeshRecord: Codable, Sendable {
     }
     func previewMappedArea() {
         previewTask?.cancel(); showingMesh = true
-        for anchor in meshes.values.prefix(128) { queueMesh(anchor) }
+        for anchor in meshes.values.prefix(LiveMeshBudget.maxVisible) { queueMesh(anchor) }
         guard locating else { return }
         previewTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(5))
@@ -352,7 +364,7 @@ struct MeshRecord: Codable, Sendable {
         for node in meshNodes.values { node.removeFromParentNode() }; meshNodes.removeAll()
     }
     private func queueMesh(_ anchor: ARMeshAnchor) {
-        guard pendingMesh.count < 128 || pendingMesh[anchor.identifier] != nil else { return }
+        guard pendingMesh.count < LiveMeshBudget.maxQueued || pendingMesh[anchor.identifier] != nil else { return }
         pendingMesh[anchor.identifier] = anchor
         processNextMesh()
     }
@@ -361,41 +373,43 @@ struct MeshRecord: Codable, Sendable {
         pendingMesh.removeValue(forKey: anchor.identifier); meshWorkerBusy = true
         let token = startToken, started = ProcessInfo.processInfo.systemUptime
         Task {
-            let data = await Task.detached(priority: .utility) {
-                let faces = anchor.geometry.faces
-                return Data(bytes: faces.buffer.contents(), count: faces.count * faces.indexCountPerPrimitive * faces.bytesPerIndex)
-            }.value
+            // Copy points and triangles from the same anchor snapshot, off the main
+            // thread. Never draw from ARKit's live buffers: they can change underneath.
+            let snapshot = await Task.detached(priority: .utility) { LiveMeshSnapshot(anchor.geometry) }.value
             meshWorkerBusy = false
-            if token == startToken, running, showingMesh, meshes[anchor.identifier] != nil {
+            if let snapshot, token == startToken, running, showingMesh, meshes[anchor.identifier] != nil {
                 meshTiming.record((ProcessInfo.processInfo.systemUptime-started)*1000)
-                renderMesh(anchor, faceData: data)
+                renderMesh(anchor, snapshot: snapshot)
             }
             processNextMesh()
         }
     }
-    private func renderMesh(_ anchor: ARMeshAnchor, faceData: Data) {
-        let mesh = anchor.geometry
-        // Use ARKit's Metal vertex buffer directly; no main-thread vertex copying.
-        let source = SCNGeometrySource(buffer: mesh.vertices.buffer, vertexFormat: .float3, semantic: .vertex,
-            vertexCount: mesh.vertices.count, dataOffset: mesh.vertices.offset, dataStride: mesh.vertices.stride)
-        let faces = mesh.faces
-        let data = faceData
-        let geometry = SCNGeometry(sources: [source], elements: [SCNGeometryElement(data: data, primitiveType: .triangles, primitiveCount: faces.count, bytesPerIndex: faces.bytesPerIndex)])
-        let material = SCNMaterial(); material.fillMode = .lines; material.diffuse.contents = UIColor(red: 0.72, green: 0.43, blue: 0.59, alpha: 0.65); material.isDoubleSided = true; material.lightingModel = .constant
-        geometry.materials = [material]
+    private func renderMesh(_ anchor: ARMeshAnchor, snapshot: LiveMeshSnapshot) {
+        let source = SCNGeometrySource(data: snapshot.vertices, semantic: .vertex, vectorCount: snapshot.vertexCount,
+            usesFloatComponents: true, componentsPerVector: 3, bytesPerComponent: 4, dataOffset: 0, dataStride: 12)
+        let element = SCNGeometryElement(data: snapshot.faces, primitiveType: .triangles,
+            primitiveCount: snapshot.faceCount, bytesPerIndex: snapshot.bytesPerIndex)
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        // One vibrant wireframe per patch; no translucent fill to stack layer on layer.
+        geometry.materials = [MeshStyle.pick(anchor.identifier)]
         let node = meshNodes[anchor.identifier] ?? SCNNode()
         node.geometry = geometry; node.simdTransform = anchor.transform
-        // Reuse the same measured vertex/index buffers for a subtle surface fill.
-        // No inferred objects or synthetic geometry are added.
-        let fill = node.childNodes.first ?? SCNNode()
-        let fillGeometry = SCNGeometry(sources: [source], elements: geometry.elements)
-        let fillMaterial = SCNMaterial()
-        fillMaterial.diffuse.contents = UIColor(red: 1, green: 0.77, blue: 0.66, alpha: 0.14)
-        fillMaterial.lightingModel = .constant; fillMaterial.isDoubleSided = true
-        fillMaterial.writesToDepthBuffer = false
-        fillGeometry.materials = [fillMaterial]; fill.geometry = fillGeometry
-        if fill.parent == nil { node.addChildNode(fill) }
-        if meshNodes[anchor.identifier] == nil { scene.scene.rootNode.addChildNode(node); meshNodes[anchor.identifier] = node }
+        for child in node.childNodes { child.removeFromParentNode() } // Drop fills from older builds.
+        if meshNodes[anchor.identifier] == nil {
+            scene.scene.rootNode.addChildNode(node); meshNodes[anchor.identifier] = node
+            pruneMeshNodes()
+        }
+    }
+    /// Keep only the patches nearest the walker on screen. Far ones are removed
+    /// (and redrawn if the walker returns), so drawing cost stays flat on long walks.
+    private func pruneMeshNodes() {
+        guard meshNodes.count > LiveMeshBudget.maxVisible, let here = position else { return }
+        let ranked = meshNodes.map { (id: $0.key, distance: simd_distance($0.value.simdWorldPosition, SIMD3(here.x, here.y, here.z))) }
+            .sorted { $0.distance > $1.distance }
+        for far in ranked.prefix(meshNodes.count - LiveMeshBudget.maxVisible) {
+            meshNodes.removeValue(forKey: far.id)?.removeFromParentNode()
+            lastMeshRender[far.id] = nil
+        }
     }
     private func consumeSafety(_ frame: ARFrame) {
         guard locating, case .normal = frame.camera.trackingState else { postureIssue = nil; floorEvidence = "Position uncertain"; return }
@@ -456,13 +470,16 @@ struct MeshRecord: Codable, Sendable {
         objectBusy = true; lastObjectTime = frame.timestamp
         let epoch = startToken
         Task {
-            let kind = await Task.detached(priority: .utility) { CameraObjectEvidence.read(frame) }.value
+            let notice = await Task.detached(priority: .utility) { CameraObjectEvidence.detect(frame) }.value
             objectBusy = false
             guard running, epoch == startToken, UserDefaults.standard.bool(forKey: "depthAdvisories") else { return }
             let valid = AgentSceneObservation.isFresh(frame, current: scene.session.currentFrame)
-            objectEvidence = valid ? CameraObjectEvidence.description(kind) : "Observation expired"
-            if objectFilter.update(kind: kind, capturedAt: frame.timestamp, now: ProcessInfo.processInfo.systemUptime, reliable: valid) {
-                onObjectAlert?(CameraObjectEvidence.description(kind) + " Pause and check your surroundings.")
+            let text = notice?.text(feet: UserDefaults.standard.bool(forKey: "guidanceFeet"))
+            objectEvidence = valid ? (text ?? CameraObjectEvidence.description(nil)) : "Observation expired"
+            // Two consecutive sightings of the same kind, at most one alert every few seconds.
+            if objectFilter.update(kind: notice?.kind.rawValue, capturedAt: frame.timestamp, now: ProcessInfo.processInfo.systemUptime, reliable: valid),
+               let text {
+                onObjectAlert?(text)
             }
         }
     }
@@ -730,5 +747,63 @@ struct SpatialCaptureView: View {
             catch { session.error = error.localizedDescription }
             saving = false
         }
+    }
+}
+
+
+/// Shared live-mesh materials: vibrant pink-magenta and green wireframes with a
+/// light fill of the same colour. Built once and reused by every mesh patch.
+@MainActor private enum MeshStyle {
+    private static func make(_ color: UIColor) -> SCNMaterial {
+        let line = SCNMaterial()
+        line.fillMode = .lines; line.diffuse.contents = color.withAlphaComponent(0.9)
+        line.isDoubleSided = true; line.lightingModel = .constant
+        return line
+    }
+    static let magenta = make(UIColor(red: 1.0, green: 0.18, blue: 0.62, alpha: 1))
+    static let green = make(UIColor(red: 0.22, green: 0.95, blue: 0.45, alpha: 1))
+    /// Stable per patch, so a patch keeps its colour as it grows.
+    static func pick(_ id: UUID) -> SCNMaterial { (id.uuid.0 ^ id.uuid.15) & 1 == 0 ? magenta : green }
+}
+
+/// Limits for the live scan overlay. Drawing stays cheap however long the walk.
+enum LiveMeshBudget {
+    /// Most mesh patches drawn at once (nearest to the walker).
+    static let maxVisible = 60
+    /// Most patches waiting to be redrawn.
+    static let maxQueued = 32
+    /// Seconds between redraws of the same patch.
+    static let refreshInterval: Double = 0.5
+    /// Patches above this many triangles are skipped for display (still saved).
+    static let maxFaces = 20_000
+}
+
+/// Points and triangles copied together from one ARKit mesh snapshot.
+struct LiveMeshSnapshot: @unchecked Sendable {
+    let vertices: Data
+    let vertexCount: Int
+    let faces: Data
+    let faceCount: Int
+    let bytesPerIndex: Int
+    init?(_ geometry: ARMeshGeometry) {
+        let v = geometry.vertices, f = geometry.faces
+        guard v.format == .float3, v.count > 0, f.count > 0, f.count <= LiveMeshBudget.maxFaces,
+              f.indexCountPerPrimitive == 3, f.bytesPerIndex == 2 || f.bytesPerIndex == 4 else { return nil }
+        let base = v.buffer.contents().advanced(by: v.offset)
+        var points = Data(count: v.count * 12)
+        points.withUnsafeMutableBytes { out in
+            for i in 0..<v.count {
+                out.baseAddress!.advanced(by: i * 12).copyMemory(from: base.advanced(by: i * v.stride), byteCount: 12)
+            }
+        }
+        let indexBytes = f.count * 3 * f.bytesPerIndex
+        let faces = Data(bytes: f.buffer.contents(), count: indexBytes)
+        // Reject a snapshot whose triangles point past its own points.
+        let valid: Bool = faces.withUnsafeBytes { raw in
+            if f.bytesPerIndex == 2 { return raw.bindMemory(to: UInt16.self).allSatisfy { Int($0) < v.count } }
+            return raw.bindMemory(to: UInt32.self).allSatisfy { Int($0) < v.count }
+        }
+        guard valid else { return nil }
+        vertices = points; vertexCount = v.count; self.faces = faces; faceCount = f.count; bytesPerIndex = f.bytesPerIndex
     }
 }

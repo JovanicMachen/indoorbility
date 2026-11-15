@@ -115,6 +115,7 @@ struct CameraAssistanceView: View {
     @ObservedObject var settings: AppStore
     @StateObject private var camera = SpatialSession()
     @StateObject private var voice = VoiceCommandInput()
+    @StateObject private var questions = DestinationAgentHost()
     @State private var response = "Point the camera ahead, then ask for a reading. Your indoor position is not verified here."
     @State private var reading = false
     @State private var diagnostics = false
@@ -138,15 +139,20 @@ struct CameraAssistanceView: View {
                     } else { Button("Start camera") { Task { await camera.start(navigation: true) } }.buttonStyle(.borderedProminent) }
                     HoldToTalk(voice: voice, before: { settings.stopSpeech() }, onUnrecognized: { settings.speak(VoiceCommandInput.notUnderstood) }, haptics: settings.preferences.haptics, result: { text in
                         let value = text.lowercased()
-                        if ["ahead", "front", "read", "see"].contains(where: value.contains) { read() }
+                        if questions.agent.canAnswerGeneralQuestion(text) { questions.agent.submit(text, model: questions) }
+                        else if ["ahead", "front", "read", "see"].contains(where: value.contains) { read() }
                         else { response = "This camera can read visible text and central depth. Choose a saved destination on Home for directions."; settings.speak(response, force: true) }
                     })
                 }.padding(24).frame(maxWidth: .infinity).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28))
             }.padding(12)
             VoiceEdgeGlow(active: voice.listening)
         }.task { await camera.start(navigation: true) }
-            .onDisappear { voice.cancel(); camera.stop() }
-            .onChange(of: phase) { _, state in if state == .background { voice.cancel(); camera.stop() } }
+            .onAppear {
+                questions.speak = { response = $0; settings.speak($0, force: true, priority: .ambient, userRequested: true) }
+                questions.acknowledge = { settings.speak(VoiceResponseTiming.acknowledgment, priority: .ambient) }
+            }
+            .onDisappear { questions.agent.cancel(); questions.speak = { _ in }; questions.acknowledge = {}; voice.cancel(); camera.stop() }
+            .onChange(of: phase) { _, state in if state == .background { questions.agent.cancel(); voice.cancel(); camera.stop() } }
             .sheet(isPresented: $diagnostics) { SensorDiagnosticsView(camera: camera) }
     }
     private func read() {

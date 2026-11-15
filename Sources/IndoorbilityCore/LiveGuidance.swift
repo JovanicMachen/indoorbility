@@ -130,14 +130,23 @@ public struct GuidanceDelivery {
     public private(set) var lastID: String?
     private var lastDelivery: TimeInterval?
     private var deliveredTurns: Set<String> = []
+    private var retryID: String?
+    private var retryAfter: TimeInterval = 0
     public init() {}
-    public mutating func reset() { lastID = nil; lastDelivery = nil; deliveredTurns = [] }
+    public mutating func reset() { lastID = nil; lastDelivery = nil; deliveredTurns = []; retryID = nil; retryAfter = 0 }
+    /// Re-arm only the CURRENT instruction if speech was lost. A short gap
+    /// prevents competing warnings and directions from retrying every frame.
+    public mutating func rearm(_ id: String, now: TimeInterval) {
+        guard lastID == id else { return }
+        lastID = nil; deliveredTurns.remove(id); retryID = id; retryAfter = now+1.5
+    }
     public mutating func consume(_ message: GuidanceMessage, listening: Bool, now: TimeInterval = 0, repeatReliable: Bool = false) -> Bool {
+        guard message.id != retryID || now >= retryAfter else { return false }
         if message.cue == .turn && deliveredTurns.contains(message.id) { return false }
         let reminder = repeatReliable && lastDelivery.map { now - $0 >= 12 } == true
         guard !listening, message.id != lastID || reminder else { return false }
         if message.cue == .turn { deliveredTurns.insert(message.id) }
-        lastID = message.id; lastDelivery = now; return true
+        lastID = message.id; lastDelivery = now; retryID = nil; return true
     }
 }
 
@@ -149,4 +158,116 @@ public enum GuidanceSoundPolicy {
         !muted && active && !suspended && (enabled || forced || voiceOver)
     }
     public static func cueAllowed(muted: Bool, enabled: Bool, suspended: Bool) -> Bool { !muted && enabled && !suspended }
+}
+
+/// Travel-loop timing. The clip plays, then a fixed silence, then repeats.
+/// A soft stop lets an audible clip finish; Stop/Mute remain immediate.
+public enum TravelLoopTiming {
+    public static let gapSeconds: Double = 1.0
+    public static let normalVolume: Float = 0.8
+    public static let duckedVolume: Float = 0.25
+    /// Normalizes a quiet recording toward full scale without clipping or
+    /// amplifying silence/noise without bound.
+    public static func gain(peak: Float) -> Float {
+        guard peak.isFinite, peak > 0.001 else { return 1 }
+        return min(4, max(1, 0.9/peak))
+    }
+    /// Seconds to wait before pausing so an audible clip is not cut off.
+    /// Zero while the player is already inside the silent gap.
+    public static func softStopDelay(currentTime: Double, clipDuration: Double) -> Double {
+        guard currentTime.isFinite, clipDuration.isFinite, currentTime >= 0, currentTime < clipDuration else { return 0 }
+        return clipDuration - currentTime
+    }
+}
+
+/// One large, glanceable instruction for indoor navigation: an arrow and the
+/// distance to walk before the next action. Derived only from the verified
+/// follower (or the labeled recorded preview), the same source as speech.
+public struct IndoorDirection: Equatable {
+    public enum Arrow: String { case straight, left, right, back, arrived }
+    public let arrow: Arrow
+    /// Metres to travel before the next action; nil when the action is now.
+    public let distance: Float?
+    public let headline: String
+    public let detail: String?
+
+    public var symbol: String {
+        switch arrow {
+        case .straight: return "arrow.up"
+        case .left: return "arrow.turn.up.left"
+        case .right: return "arrow.turn.up.right"
+        case .back: return "arrow.uturn.down"
+        case .arrived: return "checkmark.circle.fill"
+        }
+    }
+    /// Large number and short unit, e.g. ("30", "ft").
+    public static func distanceParts(_ metres: Float, feet: Bool) -> (value: String, unit: String) {
+        let unit = feet ? "ft" : "m"
+        guard metres.isFinite, metres >= 0 else { return ("–", unit) }
+        let value = metres * (feet ? 3.28084 : 1)
+        guard value < 100_000 else { return ("–", unit) }
+        return value < 1 ? ("<1", unit) : (String(Int(value.rounded())), unit)
+    }
+    public func spoken(feet: Bool) -> String {
+        var parts = [headline]
+        if let distance { parts.append(LiveGuidance.distance(distance, feet: feet)) }
+        if let detail { parts.append(detail) }
+        return parts.joined(separator: ", ")
+    }
+    private static func turnArrow(_ direction: String) -> Arrow {
+        direction == "left" ? .left : direction == "right" ? .right : .back
+    }
+    private static func turnPhrase(_ direction: String) -> String {
+        direction == "around" ? "turn around" : "turn " + direction
+    }
+
+    /// Nil when there is no trustworthy live instruction to draw.
+    public static func live(_ follower: HallwayFollower) -> IndoorDirection? {
+        let room = follower.route.room.label
+        switch follower.state {
+        case .arrived:
+            return IndoorDirection(arrow: .arrived, distance: nil, headline: "You’ve arrived", detail: room)
+        case .nearRoom:
+            guard follower.stable else { return nil }
+            return IndoorDirection(arrow: .straight, distance: follower.remaining, headline: "Almost there", detail: "Stop at " + room)
+        case .offRoute:
+            guard follower.stable else { return nil }
+            let text = follower.instruction
+            if text.hasSuffix("to your left.") { return IndoorDirection(arrow: .left, distance: nil, headline: "Path is to your left", detail: "Move left to rejoin it") }
+            if text.hasSuffix("to your right.") { return IndoorDirection(arrow: .right, distance: nil, headline: "Path is to your right", detail: "Move right to rejoin it") }
+            if text.hasSuffix("behind you.") { return IndoorDirection(arrow: .back, distance: nil, headline: "Path is behind you", detail: "Turn around to rejoin it") }
+            if text.hasSuffix("ahead of you.") { return IndoorDirection(arrow: .straight, distance: nil, headline: "Path is ahead", detail: "Go straight to rejoin it") }
+            return nil
+        case .guiding:
+            guard follower.stable else { return nil }
+            let text = follower.instruction
+            if text.hasPrefix("Turn around") || text.hasPrefix("Moving away") {
+                return IndoorDirection(arrow: .back, distance: nil, headline: "Turn around", detail: "You are facing away from " + room)
+            }
+            // Stairs, heading checks and other warnings keep their own wording.
+            guard text.hasPrefix("Continue straight") else { return nil }
+            if let turn = follower.nextMeasuredTurn {
+                let ahead = max(0, turn.along - follower.progress)
+                if ahead <= 1.5 {
+                    let phrase = turnPhrase(turn.direction)
+                    return IndoorDirection(arrow: turnArrow(turn.direction), distance: nil,
+                        headline: phrase.prefix(1).uppercased() + phrase.dropFirst() + " now", detail: nil)
+                }
+                return IndoorDirection(arrow: .straight, distance: ahead, headline: "Go straight", detail: "then " + turnPhrase(turn.direction))
+            }
+            return IndoorDirection(arrow: .straight, distance: follower.remaining, headline: "Go straight", detail: "to " + room)
+        default:
+            return nil
+        }
+    }
+    /// Directions from the recorded start only; never a live position.
+    public static func preview(_ preview: RecordedRoutePreview) -> IndoorDirection {
+        if let turn = preview.firstTurn, preview.firstLegDistance <= 1.5 {
+            let phrase = turnPhrase(turn)
+            return IndoorDirection(arrow: turnArrow(turn), distance: nil,
+                headline: phrase.prefix(1).uppercased() + phrase.dropFirst(), detail: "at the recorded start")
+        }
+        return IndoorDirection(arrow: .straight, distance: preview.firstLegDistance, headline: "Go straight",
+            detail: preview.firstTurn.map { "then " + turnPhrase($0) } ?? "to " + preview.destination)
+    }
 }

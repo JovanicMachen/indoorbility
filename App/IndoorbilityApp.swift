@@ -10,7 +10,9 @@ struct IndoorbilityApp: App {
             "floorAlerts": true,
             "phoneCoaching": true,
             "guidanceCues": true,
-            "directionalSound": false
+            "directionalSound": false,
+            // Indoor directions read "30 ft"; a user who switched to metres keeps metres.
+            "guidanceFeet": true
         ])
     }
     var body: some Scene {

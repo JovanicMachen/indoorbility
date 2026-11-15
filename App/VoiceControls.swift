@@ -97,21 +97,14 @@ struct HoldToTalk: View {
     var body: some View {
         VStack(spacing: 8) {
             Button { if tapping { toggle() } } label: {
-                Image(systemName: voice.listening ? "waveform" : "mic.fill")
-                    .font(.system(size: 32, weight: .medium)).foregroundStyle(.white)
-                    .frame(width: diameter, height: diameter)
-                    .background(LinearGradient(colors: [.indoorTeal, Color(red: 0.53, green: 0.29, blue: 0.43)], startPoint: .topLeading, endPoint: .bottomTrailing), in: Circle())
-                    .overlay(Circle().stroke(Color.indoorPeach.opacity(0.6), lineWidth: 2))
-                    .background(Circle().fill(Color.indoorPeach.opacity(voice.listening ? 0.4 : 0.16)).padding(-12))
-                    .shadow(color: Color.indoorPeach.opacity(voice.listening ? 0.65 : 0.25), radius: voice.listening ? 28 : 15)
-                    .animation(.easeInOut(duration: 0.3), value: voice.listening)
+                OrnamentMicButton(listening: voice.listening, diameter: diameter, showTree: !compact)
             }.buttonStyle(.plain)
                 .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
                     guard !tapping, !held, !voice.busy else { return }
                     held = true; begin()
                 }.onEnded { _ in
                     guard !tapping else { return }; held = false
-                    if voice.listening { voice.finish(); if haptics { UISelectionFeedbackGenerator().selectionChanged() } }
+                    if voice.listening { voice.finish(); if haptics { AppHaptics.shared.selection() } }
                     else if voice.status != "Finishing…" { starting?.cancel(); voice.cancel() }
                 })
                 .accessibilityLabel(voice.listening ? "Finish speaking" : "Speak to Indoorbility")
@@ -126,11 +119,12 @@ struct HoldToTalk: View {
         .onChange(of: phase) { _, value in if value != .active { starting?.cancel(); held = false; voice.cancel() } }
     }
     private func begin() {
+        if haptics { AppHaptics.shared.tap(0.6) } // Felt confirmation that listening started.
         before()
-        starting = Task { await voice.start(onResult: result) }
+        starting = Task { await voice.start(automaticallyFinish: tapping, onResult: result) }
     }
     private func toggle() {
-        if voice.listening { voice.finish(); if haptics { UISelectionFeedbackGenerator().selectionChanged() } } else if voice.busy { voice.cancel() } else { begin() }
+        if voice.listening { voice.finish(); if haptics { AppHaptics.shared.selection() } } else if voice.busy { voice.cancel() } else { begin() }
     }
 }
 
@@ -422,5 +416,143 @@ struct SwipeLeftBackModifier: ViewModifier {
 extension View {
     func swipeLeftToGoBack(enabled: Bool = true, action: (() -> Void)? = nil) -> some View {
         modifier(SwipeLeftBackModifier(enabled: enabled, action: action))
+    }
+}
+
+
+/// The speak button as a Christmas ornament hanging in front of a small tree.
+/// Purely decorative styling; the button, gestures and labels are unchanged.
+struct OrnamentMicButton: View {
+    var listening: Bool
+    var diameter: CGFloat
+    var showTree = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var swing = false
+    private let gold = Color(red: 0.86, green: 0.67, blue: 0.32)
+    private let berry = Color(red: 0.62, green: 0.20, blue: 0.33)
+    var body: some View {
+        // The tree sits behind without changing the button's layout size.
+        bauble
+            .rotationEffect(.degrees(listening && !reduceMotion ? (swing ? 6 : -6) : 0), anchor: .top)
+            .animation(listening && !reduceMotion ? .easeInOut(duration: 0.6).repeatForever(autoreverses: true) : .default, value: swing)
+            .background {
+                if showTree {
+                    ChristmasTree(gold: gold)
+                        .frame(width: diameter * 1.6, height: diameter * 1.6)
+                        .offset(y: -diameter * 0.12)
+                        .allowsHitTesting(false)
+                }
+            }
+            .contentShape(Circle())
+        .onChange(of: listening) { _, value in swing = value }
+    }
+    private var bauble: some View {
+        VStack(spacing: -diameter * 0.04) {
+            // Hanging loop and gold cap.
+            Circle().stroke(gold, lineWidth: max(1.5, diameter * 0.025))
+                .frame(width: diameter * 0.14, height: diameter * 0.14)
+            RoundedRectangle(cornerRadius: diameter * 0.04)
+                .fill(LinearGradient(colors: [gold.opacity(0.85), gold, gold.opacity(0.7)], startPoint: .leading, endPoint: .trailing))
+                .frame(width: diameter * 0.3, height: diameter * 0.13)
+                .zIndex(1)
+            ZStack {
+                Circle().fill(RadialGradient(colors: [Color(red: 0.78, green: 0.42, blue: 0.58), .indoorTeal, berry.opacity(0.95)],
+                                             center: UnitPoint(x: 0.35, y: 0.3), startRadius: 2, endRadius: diameter * 0.62))
+                // Festive band of tiny dots.
+                OrnamentBand().stroke(Color.indoorPeach.opacity(0.75), style: StrokeStyle(lineWidth: max(1, diameter * 0.02), lineCap: .round, dash: [0.1, diameter * 0.07]))
+                    .padding(diameter * 0.04)
+                // Glossy highlight.
+                Ellipse().fill(.white.opacity(0.35))
+                    .frame(width: diameter * 0.32, height: diameter * 0.16)
+                    .rotationEffect(.degrees(-30))
+                    .offset(x: -diameter * 0.2, y: -diameter * 0.24)
+                Image(systemName: listening ? "waveform" : "mic.fill")
+                    .font(.system(size: max(16, diameter * 0.32), weight: .semibold))
+                    .foregroundStyle(.white)
+                    .symbolEffect(.variableColor.iterative, isActive: listening && !reduceMotion)
+            }
+            .frame(width: diameter, height: diameter)
+            .overlay(Circle().stroke(gold.opacity(0.55), lineWidth: max(1, diameter * 0.018)))
+            .shadow(color: Color.indoorPeach.opacity(listening ? 0.8 : 0.3), radius: listening ? diameter * 0.25 : diameter * 0.1)
+        }
+    }
+}
+
+private struct OrnamentBand: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let y = rect.midY + rect.height * 0.18
+        p.move(to: CGPoint(x: rect.minX + rect.width * 0.08, y: y))
+        p.addQuadCurve(to: CGPoint(x: rect.maxX - rect.width * 0.08, y: y),
+                       control: CGPoint(x: rect.midX, y: y + rect.height * 0.16))
+        return p
+    }
+}
+
+private struct ChristmasTree: View {
+    var gold: Color
+    private let pine = Color(red: 0.30, green: 0.50, blue: 0.38)
+    var body: some View {
+        Canvas { context, size in
+            let w = size.width, h = size.height
+            var tree = Path()
+            for tier in 0..<3 {
+                let t = CGFloat(tier)
+                let top = h * (0.06 + t * 0.2)
+                let half = w * (0.24 + t * 0.12)
+                tree.move(to: CGPoint(x: w/2, y: top))
+                tree.addQuadCurve(to: CGPoint(x: w/2 + half, y: top + h * 0.34), control: CGPoint(x: w/2 + half * 0.45, y: top + h * 0.22))
+                tree.addQuadCurve(to: CGPoint(x: w/2 - half, y: top + h * 0.34), control: CGPoint(x: w/2, y: top + h * 0.38))
+                tree.addQuadCurve(to: CGPoint(x: w/2, y: top), control: CGPoint(x: w/2 - half * 0.45, y: top + h * 0.22))
+            }
+            context.fill(tree, with: .color(pine.opacity(0.28)))
+            // Tiny lights on the outer branches.
+            let lights: [(CGFloat, CGFloat)] = [(0.36, 0.32), (0.66, 0.36), (0.26, 0.58), (0.76, 0.6), (0.2, 0.8), (0.82, 0.82)]
+            for (i, l) in lights.enumerated() {
+                let r = w * 0.025
+                context.fill(Path(ellipseIn: CGRect(x: w*l.0 - r, y: h*l.1 - r, width: r*2, height: r*2)),
+                             with: .color((i % 2 == 0 ? gold : Color.indoorPeach).opacity(0.75)))
+            }
+            context.draw(Text(Image(systemName: "star.fill")).font(.system(size: w * 0.12)).foregroundColor(gold),
+                         at: CGPoint(x: w/2, y: h * 0.05))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// Snow flurries that drift down from the top edge and fade away by the
+/// middle of the screen. Decorative only: never takes touches, hidden from
+/// VoiceOver, and still with Reduce Motion.
+struct TopSnowfall: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var phase
+    var body: some View {
+        GeometryReader { proxy in
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: reduceMotion || phase != .active)) { timeline in
+                Canvas { context, size in
+                    let time = reduceMotion ? 40 : timeline.date.timeIntervalSinceReferenceDate
+                    for index in 0..<40 {
+                        let seed = Double(index)
+                        let column = (seed * 0.61803398875).truncatingRemainder(dividingBy: 1)
+                        let period = 7 + Double(index % 5) * 1.8
+                        let progress = (time / period + seed * 0.173).truncatingRemainder(dividingBy: 1)
+                        let x = column * size.width + sin(time * 0.7 + seed) * 14
+                        let y = progress * size.height
+                        // Full strength near the top, gone by halfway down the screen.
+                        let fade = progress < 0.35 ? 1 : max(0, 1 - (progress - 0.35) / 0.65)
+                        let flakeSize = 8 + Double(index % 4) * 3
+                        var flake = context
+                        flake.opacity = 0.9 * fade * fade
+                        flake.translateBy(x: x, y: y)
+                        flake.rotate(by: .radians(time * 0.6 + seed))
+                        flake.draw(Text(Image(systemName: "snowflake")).font(.system(size: flakeSize, weight: .semibold))
+                            .foregroundColor(Color(red: 0.30, green: 0.55, blue: 0.96)), at: .zero)
+                    }
+                }
+            }
+            .frame(height: proxy.size.height * 0.5)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
